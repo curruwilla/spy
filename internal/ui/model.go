@@ -10,12 +10,13 @@ import (
 )
 
 // mode is what the footer is currently doing: showing help, reading a
-// filter, or asking to confirm a kill.
+// filter or a set of thresholds, or asking to confirm a kill.
 type mode int
 
 const (
 	modeNormal mode = iota
 	modeFilter
+	modeThreshold
 	modeConfirm
 )
 
@@ -25,6 +26,7 @@ type Options struct {
 	Sort     string
 	Tree     bool
 	Filter   string
+	Min      string // threshold clauses, e.g. "cpu>5 mem>500M time>1m"
 }
 
 // Model is the whole application state.
@@ -42,8 +44,9 @@ type Model struct {
 	sort    sortKey
 	reverse bool
 	tree    bool
-	filter  string
+	filter  filter
 	mode    mode
+	input   string // what is being typed at the threshold prompt
 
 	cursor      int // index into rows
 	offset      int // first visible row, for scrolling
@@ -53,9 +56,14 @@ type Model struct {
 	status  string       // one-off message shown in the footer
 }
 
-// New builds the model. It fails only on an invalid sort column.
+// New builds the model. It fails on an invalid sort column or on
+// thresholds it cannot parse.
 func New(c *proc.Collector, opts Options) (Model, error) {
 	key, err := parseSortKey(opts.Sort)
+	if err != nil {
+		return Model{}, err
+	}
+	min, err := parseThresholds(opts.Min)
 	if err != nil {
 		return Model{}, err
 	}
@@ -64,7 +72,7 @@ func New(c *proc.Collector, opts Options) (Model, error) {
 		interval:  opts.Interval,
 		sort:      key,
 		tree:      opts.Tree,
-		filter:    opts.Filter,
+		filter:    filter{text: opts.Filter, min: min},
 		width:     80,
 		height:    24,
 	}, nil
@@ -122,6 +130,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeFilter:
 		return m.handleFilterKey(msg)
+	case modeThreshold:
+		return m.handleThresholdKey(msg)
 	case modeConfirm:
 		return m.handleConfirmKey(msg)
 	}
@@ -162,6 +172,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.rebuild()
 	case "/":
 		m.mode = modeFilter
+	case "l":
+		// Prefilled with what is already active, so it can be edited
+		// instead of retyped.
+		m.mode, m.input = modeThreshold, m.filter.min.String()
 	case "x":
 		if p, ok := m.selected(); ok {
 			m.confirm, m.mode = p, modeConfirm
@@ -175,21 +189,53 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		m.mode = modeNormal
 	case tea.KeyEsc:
-		m.mode, m.filter = modeNormal, ""
+		m.mode, m.filter.text = modeNormal, ""
 		m.rebuild()
 	case tea.KeyBackspace:
-		if runes := []rune(m.filter); len(runes) > 0 {
-			m.filter = string(runes[:len(runes)-1])
+		if runes := []rune(m.filter.text); len(runes) > 0 {
+			m.filter.text = string(runes[:len(runes)-1])
 			m.rebuild()
 		}
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyRunes, tea.KeySpace:
-		m.filter += string(msg.Runes)
+		m.filter.text += string(msg.Runes)
 		if msg.Type == tea.KeySpace {
-			m.filter += " "
+			m.filter.text += " "
 		}
 		m.rebuild()
+	}
+	return m, nil
+}
+
+// handleThresholdKey reads the "cpu>5 mem>500M" prompt. Unlike the text
+// filter it applies on enter, because half-typed clauses do not parse; a
+// clause that never parses keeps the prompt open with the reason in it.
+func (m Model) handleThresholdKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.status = ""
+	switch msg.Type {
+	case tea.KeyEnter:
+		min, err := parseThresholds(m.input)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.mode, m.filter.min = modeNormal, min
+		m.rebuild()
+	case tea.KeyEsc:
+		m.mode, m.input, m.filter.min = modeNormal, "", thresholds{}
+		m.rebuild()
+	case tea.KeyBackspace:
+		if runes := []rune(m.input); len(runes) > 0 {
+			m.input = string(runes[:len(runes)-1])
+		}
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyRunes, tea.KeySpace:
+		m.input += string(msg.Runes)
+		if msg.Type == tea.KeySpace {
+			m.input += " "
+		}
 	}
 	return m, nil
 }

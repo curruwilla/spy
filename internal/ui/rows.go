@@ -14,9 +14,39 @@ type row struct {
 	indent string // tree connectors, empty in flat mode
 }
 
+// filter decides which processes reach the table: a text match against the
+// command, the owner or the pid, plus the numeric floors below which a
+// process is not worth showing. The zero value keeps everything.
+type filter struct {
+	text string
+	min  thresholds
+}
+
+// empty reports whether the filter lets every process through.
+func (f filter) empty() bool {
+	return f.text == "" && f.min == (thresholds{})
+}
+
+// matches reports whether a process satisfies both halves of the filter.
+func (f filter) matches(p proc.Process) bool {
+	return f.min.keeps(p) && f.matchesText(p)
+}
+
+// matchesText compares the typed text against the command, the owner and
+// the pid.
+func (f filter) matchesText(p proc.Process) bool {
+	if f.text == "" {
+		return true
+	}
+	text := strings.ToLower(f.text)
+	return strings.Contains(strings.ToLower(p.Command), text) ||
+		strings.Contains(strings.ToLower(p.User), text) ||
+		strings.Contains(strconv.Itoa(p.PID), text)
+}
+
 // buildRows applies the filter, the sort column and the view mode to a
 // snapshot, producing the exact lines the table will draw.
-func buildRows(procs []proc.Process, key sortKey, reverse bool, filter string, tree bool) []row {
+func buildRows(procs []proc.Process, key sortKey, reverse bool, f filter, tree bool) []row {
 	less := func(a, b proc.Process) int {
 		if reverse {
 			return key.compare(b, a)
@@ -24,15 +54,15 @@ func buildRows(procs []proc.Process, key sortKey, reverse bool, filter string, t
 		return key.compare(a, b)
 	}
 	if tree {
-		return treeRows(procs, less, filter)
+		return treeRows(procs, less, f)
 	}
-	return flatRows(procs, less, filter)
+	return flatRows(procs, less, f)
 }
 
-func flatRows(procs []proc.Process, less func(a, b proc.Process) int, filter string) []row {
+func flatRows(procs []proc.Process, less func(a, b proc.Process) int, f filter) []row {
 	kept := make([]proc.Process, 0, len(procs))
 	for _, p := range procs {
-		if matches(p, filter) {
+		if f.matches(p) {
 			kept = append(kept, p)
 		}
 	}
@@ -48,14 +78,14 @@ func flatRows(procs []proc.Process, less func(a, b proc.Process) int, filter str
 // treeRows nests each process under its parent. With a filter active the
 // matches are kept along with their ancestors, so the hierarchy stays
 // readable instead of collapsing into orphans.
-func treeRows(procs []proc.Process, less func(a, b proc.Process) int, filter string) []row {
+func treeRows(procs []proc.Process, less func(a, b proc.Process) int, f filter) []row {
 	byPID := make(map[int]proc.Process, len(procs))
 	children := make(map[int][]proc.Process, len(procs))
 	for _, p := range procs {
 		byPID[p.PID] = p
 	}
 
-	keep := keepSet(procs, byPID, filter)
+	keep := keepSet(procs, byPID, f)
 	var roots []proc.Process
 	for _, p := range procs {
 		if !keep[p.PID] {
@@ -112,16 +142,16 @@ func continuation(last bool) string {
 
 // keepSet marks the processes a filter selects plus every ancestor needed to
 // reach them. Without a filter every process is kept.
-func keepSet(procs []proc.Process, byPID map[int]proc.Process, filter string) map[int]bool {
+func keepSet(procs []proc.Process, byPID map[int]proc.Process, f filter) map[int]bool {
 	keep := make(map[int]bool, len(procs))
-	if filter == "" {
+	if f.empty() {
 		for _, p := range procs {
 			keep[p.PID] = true
 		}
 		return keep
 	}
 	for _, p := range procs {
-		if !matches(p, filter) {
+		if !f.matches(p) {
 			continue
 		}
 		for cur, ok := p, true; ok && !keep[cur.PID]; cur, ok = byPID[cur.PPID] {
@@ -129,16 +159,4 @@ func keepSet(procs []proc.Process, byPID map[int]proc.Process, filter string) ma
 		}
 	}
 	return keep
-}
-
-// matches reports whether a process satisfies the filter, which is compared
-// against the command, the owner and the pid.
-func matches(p proc.Process, filter string) bool {
-	if filter == "" {
-		return true
-	}
-	filter = strings.ToLower(filter)
-	return strings.Contains(strings.ToLower(p.Command), filter) ||
-		strings.Contains(strings.ToLower(p.User), filter) ||
-		strings.Contains(strconv.Itoa(p.PID), filter)
 }

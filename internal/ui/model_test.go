@@ -167,24 +167,113 @@ func TestFilterTypingIsLive(t *testing.T) {
 	}
 
 	m = press(t, m, "n", "g")
-	if m.filter != "ng" || len(m.rows) != 2 {
-		t.Errorf("filter %q matched %d rows, want 2", m.filter, len(m.rows))
+	if m.filter.text != "ng" || len(m.rows) != 2 {
+		t.Errorf("filter %q matched %d rows, want 2", m.filter.text, len(m.rows))
 	}
 
 	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m = back.(Model)
-	if m.filter != "n" {
-		t.Errorf("filter after backspace = %q, want %q", m.filter, "n")
+	if m.filter.text != "n" {
+		t.Errorf("filter after backspace = %q, want %q", m.filter.text, "n")
 	}
 
 	done, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m = done.(Model); m.mode != modeNormal || m.filter != "n" {
-		t.Errorf("enter should keep the filter and leave input mode, got mode=%v filter=%q", m.mode, m.filter)
+	if m = done.(Model); m.mode != modeNormal || m.filter.text != "n" {
+		t.Errorf("enter should keep the filter and leave input mode, got mode=%v filter=%q", m.mode, m.filter.text)
 	}
 
 	cleared, _ := press(t, m, "/").Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m = cleared.(Model); m.filter != "" || len(m.rows) != len(sample()) {
-		t.Errorf("esc should clear the filter, got %q with %d rows", m.filter, len(m.rows))
+	if m = cleared.(Model); m.filter.text != "" || len(m.rows) != len(sample()) {
+		t.Errorf("esc should clear the filter, got %q with %d rows", m.filter.text, len(m.rows))
+	}
+}
+
+// TestThresholdPromptAppliesOnEnter covers the > prompt: it is buffered,
+// not live, because a half-typed clause does not parse.
+func TestThresholdPromptAppliesOnEnter(t *testing.T) {
+	m := testModel(t, busy())
+	m = press(t, m, "l")
+	if m.mode != modeThreshold {
+		t.Fatal("l should open the threshold prompt")
+	}
+
+	m = press(t, m, "c", "p", "u", ">", "5")
+	if m.input != "cpu>5" {
+		t.Fatalf("input = %q, want %q", m.input, "cpu>5")
+	}
+	if len(m.rows) != len(busy()) {
+		t.Errorf("typing filtered %d rows already, it should wait for enter", len(m.rows))
+	}
+
+	done, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = done.(Model)
+	if m.mode != modeNormal {
+		t.Errorf("mode = %v, want normal after enter", m.mode)
+	}
+	if got, want := pids(m.rows), []int{11, 10}; !equal(got, want) {
+		t.Errorf("rows = %v, want %v", got, want)
+	}
+
+	// Reopening prefills the prompt with what is active, so it can be
+	// edited instead of retyped.
+	m = press(t, m, "l")
+	if m.input != "cpu>5%" {
+		t.Errorf("input = %q, want the active threshold", m.input)
+	}
+
+	cleared, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m = cleared.(Model); m.mode != modeNormal || len(m.rows) != len(busy()) {
+		t.Errorf("esc should clear the thresholds, got mode=%v with %d rows", m.mode, len(m.rows))
+	}
+}
+
+// TestThresholdPromptKeepsBadInput leaves a clause that does not parse on
+// screen with the reason, instead of silently dropping what was typed.
+func TestThresholdPromptKeepsBadInput(t *testing.T) {
+	m := testModel(t, busy())
+	m = press(t, m, "l", "d", "i", "s", "k", ">", "5")
+	bad, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = bad.(Model)
+
+	if m.mode != modeThreshold || m.input != "disk>5" {
+		t.Fatalf("mode=%v input=%q, want the prompt still open with the text", m.mode, m.input)
+	}
+	if !strings.Contains(m.View(), "unknown threshold") {
+		t.Error("the prompt should say why the clause was rejected")
+	}
+	if len(m.rows) != len(busy()) {
+		t.Error("a rejected clause should not change the list")
+	}
+
+	// Fixing it clears the complaint.
+	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = back.(Model)
+	if m.status != "" || m.input != "disk>" {
+		t.Errorf("status=%q input=%q, want the error dropped on the next keystroke", m.status, m.input)
+	}
+}
+
+// TestPromptsSurviveARefreshError covers a prompt opening while the footer
+// is showing a failed refresh: without the echo the key looks dead, and
+// everything typed after it disappears into a mode nothing announced.
+func TestPromptsSurviveARefreshError(t *testing.T) {
+	cases := []struct {
+		key  string
+		want string
+	}{
+		{"l", "min:"},
+		{"/", "filter:"},
+		{"x", "SIGTERM"},
+	}
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			m := testModel(t, busy())
+			m.err = errFake
+			m = press(t, m, c.key)
+			if !strings.Contains(m.View(), c.want) {
+				t.Errorf("%q opened mode %v but the footer still shows the error", c.key, m.mode)
+			}
+		})
 	}
 }
 

@@ -151,15 +151,24 @@ func (m Model) cells(pid, user, state, cpu, mem, rss, cputime, command string) [
 }
 
 func (m Model) viewFooter() string {
+	// A prompt owns the footer while it is open: the refresh error is
+	// still there when it closes, but a prompt with no echo looks like a
+	// key that did nothing.
 	switch {
-	case m.err != nil:
-		return styleAlert.Render(pad("error: "+m.err.Error(), m.width, false))
 	case m.mode == modeConfirm:
 		return styleAlert.Render(pad(fmt.Sprintf("send SIGTERM to %d %s ? [y/N]",
 			m.confirm.PID, firstWord(m.confirm.Command)), m.width, false))
 	case m.mode == modeFilter:
-		return styleLabel.Render("filter: ") + m.filter + styleSelected.Render(" ") +
+		return styleLabel.Render("filter: ") + m.filter.text + styleSelected.Render(" ") +
 			styleDim.Render("   enter to keep it · esc to clear")
+	case m.mode == modeThreshold:
+		prompt := styleLabel.Render("min: ") + m.input + styleSelected.Render(" ")
+		if m.status != "" {
+			return prompt + "  " + styleAlert.Render(m.status)
+		}
+		return prompt + styleDim.Render("   cpu>5 mem>500M time>1m · enter to apply · esc to clear")
+	case m.err != nil:
+		return styleAlert.Render(pad("error: "+m.err.Error(), m.width, false))
 	case m.status != "":
 		return styleWarn.Render(m.status)
 	}
@@ -170,13 +179,17 @@ func (m Model) viewFooter() string {
 		hint("tab", "column"),
 		hint("t", "tree"),
 		hint("/", "filter"),
+		hint("l", "min"),
 		hint("x", "kill"),
 		hint("q", "quit"),
 	}, styleDim.Render(" · "))
 
 	state := fmt.Sprintf("sort %s", m.sort)
-	if m.filter != "" {
-		state += fmt.Sprintf(" · filter %q", m.filter)
+	if m.filter.text != "" {
+		state += fmt.Sprintf(" · filter %q", m.filter.text)
+	}
+	if min := m.filter.min.String(); min != "" {
+		state += " · " + min
 	}
 	if m.tree {
 		state += " · tree"

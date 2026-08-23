@@ -15,7 +15,7 @@ SWP  ░░░░░░░░░░░░░░░░░░░░░░░░░
  271282 will      S  13.6   2.2   693M    20:12 /usr/bin/warp-terminal
     357 root      S   9.0   0.0     0B     0:31 [jbd2/nvme0n1p3-8]
    5118 will      S   9.0   2.0   635M    52:17 /usr/bin/gnome-shell
-↑↓ move · c/m/p/n sort · tab column · t tree · / filter · x kill · q quit         sort cpu
+↑↓ move · c/m/p/n sort · tab column · t tree · / filter · l min · x kill · q quit sort cpu
 ```
 
 ## Instalação
@@ -40,7 +40,11 @@ spy                      # padrão: atualiza a cada 2s, ordenado por CPU
 spy -i 500ms             # intervalo de atualização
 spy -sort mem            # cpu, mem, pid, name ou time
 spy -tree                # abre já em modo árvore
-spy -filter chrome       # abre já filtrado
+spy -filter chrome       # abre já filtrado por texto
+spy -min-cpu 5           # só processos com pelo menos 5% de CPU
+spy -min-mem 500M        # pelo menos 500 MB residentes (ou -min-mem 2 para 2% da RAM)
+spy -min-time 1m30s      # pelo menos 1m30s de CPU acumulada (90 = 90s)
+spy -min-cpu 5 -min-mem 2 -min-time 1m
 spy -version
 ```
 
@@ -55,14 +59,33 @@ spy -version
 | a mesma tecla de novo | inverte a direção |
 | `t` | alterna lista plana ↔ árvore de processos |
 | `/` | filtra por comando, usuário ou PID (aplica enquanto digita; `Esc` limpa) |
+| `l` | limites mínimos de CPU, memória e tempo (`Enter` aplica; `Esc` limpa) |
 | `x` | envia SIGTERM ao processo selecionado, com confirmação `y/N` |
 | `q` / `Esc` / `Ctrl+C` | sai |
+
+### Limites mínimos
+
+O `l` (de limite) abre um campo onde se escreve o piso de cada medida — o que está abaixo dele some
+da tabela:
+
+```
+cpu>5              pelo menos 5% de um núcleo
+mem>2              pelo menos 2% da RAM total
+mem>500M           ou pelo menos 500 MB residentes (K, M, G, T, P e B)
+time>1m30s         pelo menos 1m30s de CPU acumulada (90 = 90 segundos)
+cpu>5 mem>500M     vários limites de uma vez, todos precisam ser atendidos
+```
+
+O sinal é decoração: `cpu>5`, `cpu>=5`, `cpu 5` e `cpu=5` são a mesma coisa, "pelo menos
+5". As duas formas de dizer memória são alternativas — a última escrita substitui a
+outra. O campo já abre preenchido com o que está ativo, para editar em vez de redigitar,
+e o texto do `/` continua valendo em conjunto: os dois filtros se somam.
 
 O cursor acompanha o processo, não a posição: uma atualização da lista não muda a
 seleção nem faz a tela pular. Já ao ordenar, a tela volta para a primeira linha — a
 ideia é ver quem está no topo agora, então a seleção passa para o novo primeiro
 processo. No modo árvore, um filtro mantém também os processos-pai do que casou, para
-a hierarquia continuar legível.
+a hierarquia continuar legível — vale tanto para o texto quanto para os limites.
 
 ## Como funciona
 

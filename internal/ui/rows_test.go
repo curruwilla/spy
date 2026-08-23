@@ -57,7 +57,7 @@ func TestFlatSorting(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := pids(buildRows(sample(), c.key, c.reverse, "", false))
+			got := pids(buildRows(sample(), c.key, c.reverse, filter{}, false))
 			if !equal(got, c.want) {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
@@ -78,7 +78,7 @@ func TestFilterMatchesCommandUserAndPID(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.filter, func(t *testing.T) {
-			got := pids(buildRows(sample(), sortCPU, false, c.filter, false))
+			got := pids(buildRows(sample(), sortCPU, false, filter{text: c.filter}, false))
 			if !equal(got, c.want) {
 				t.Errorf("filter %q gave %v, want %v", c.filter, got, c.want)
 			}
@@ -87,7 +87,7 @@ func TestFilterMatchesCommandUserAndPID(t *testing.T) {
 }
 
 func TestTreeNesting(t *testing.T) {
-	rows := buildRows(sample(), sortCPU, false, "", true)
+	rows := buildRows(sample(), sortCPU, false, filter{}, true)
 	if got, want := pids(rows), []int{1, 10, 11, 20}; !equal(got, want) {
 		t.Fatalf("order = %v, want %v (parents before children)", got, want)
 	}
@@ -103,7 +103,7 @@ func TestTreeNesting(t *testing.T) {
 // TestTreeFilterKeepsAncestors makes sure a match deep in the tree still
 // shows the chain that leads to it.
 func TestTreeFilterKeepsAncestors(t *testing.T) {
-	rows := buildRows(sample(), sortCPU, false, "worker", true)
+	rows := buildRows(sample(), sortCPU, false, filter{text: "worker"}, true)
 	if got, want := pids(rows), []int{1, 10, 11}; !equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -113,7 +113,7 @@ func TestTreeFilterKeepsAncestors(t *testing.T) {
 // which happens constantly on a live machine.
 func TestTreeOrphanBecomesRoot(t *testing.T) {
 	procs := append(sample(), proc.Process{PID: 99, PPID: 4242, Command: "orphan", CPU: 100})
-	rows := buildRows(procs, sortCPU, false, "", true)
+	rows := buildRows(procs, sortCPU, false, filter{}, true)
 	if rows[0].proc.PID != 99 || rows[0].indent != "" {
 		t.Errorf("orphan = %+v, want a root row", rows[0])
 	}
@@ -124,7 +124,7 @@ func TestTreeOrphanBecomesRoot(t *testing.T) {
 
 func TestTreeSelfParentDoesNotLoop(t *testing.T) {
 	procs := []proc.Process{{PID: 3, PPID: 3, Command: "weird"}}
-	rows := buildRows(procs, sortCPU, false, "", true)
+	rows := buildRows(procs, sortCPU, false, filter{}, true)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
