@@ -210,7 +210,7 @@ func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // sortBy switches column, or flips the direction when the column is already
-// the active one.
+// the active one. Re-sorting always shows the new top of the list.
 func (m *Model) sortBy(key sortKey) {
 	if m.sort == key {
 		m.reverse = !m.reverse
@@ -218,6 +218,17 @@ func (m *Model) sortBy(key sortKey) {
 		m.sort, m.reverse = key, false
 	}
 	m.rebuild()
+	m.jumpToTop()
+}
+
+// jumpToTop parks the cursor on the first row. The point of a re-sort is to
+// see what is now at the top, so the selection moves to the new first
+// process instead of the list scrolling off to wherever the old one went.
+func (m *Model) jumpToTop() {
+	m.cursor, m.offset = 0, 0
+	if p, ok := m.selected(); ok {
+		m.selectedPID = p.PID
+	}
 }
 
 func (m *Model) moveCursor(delta int) {

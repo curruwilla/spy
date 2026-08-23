@@ -68,22 +68,65 @@ func TestTabCyclesColumns(t *testing.T) {
 	}
 }
 
-// TestCursorFollowsProcess is the reason the model tracks a pid instead of
-// an index: a refresh must not move the highlight to another process.
-func TestCursorFollowsProcess(t *testing.T) {
+// TestCursorFollowsProcessAcrossRefresh is the reason the model tracks a
+// pid instead of an index: a refresh must not move the highlight to another
+// process.
+func TestCursorFollowsProcessAcrossRefresh(t *testing.T) {
 	m := testModel(t, sample())
 	m = press(t, m, "j", "j") // third row by cpu: pid 20
-	selected, _ := m.selected()
-	if selected.PID != 20 {
-		t.Fatalf("cursor on pid %d, want 20", selected.PID)
+	if got, _ := m.selected(); got.PID != 20 {
+		t.Fatalf("cursor on pid %d, want 20", got.PID)
 	}
 
-	m = press(t, m, "p") // reorder by pid: 1, 10, 11, 20
+	// The next snapshot has pid 20 busiest, so it moves to the top.
+	refreshed := sample()
+	refreshed[3].CPU = 99
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: refreshed}})
+	m = next.(Model)
+
 	if got, _ := m.selected(); got.PID != 20 {
-		t.Errorf("after re-sorting the cursor moved to pid %d, want 20", got.PID)
+		t.Errorf("after a refresh the cursor moved to pid %d, want 20", got.PID)
 	}
-	if m.cursor != 3 {
-		t.Errorf("cursor index = %d, want 3", m.cursor)
+	if m.cursor != 0 {
+		t.Errorf("cursor index = %d, want 0 (pid 20 is now first)", m.cursor)
+	}
+}
+
+// TestSortJumpsToTop covers the rule that re-sorting shows the new head of
+// the list: the cursor goes to the first row even though that selects a
+// different process.
+func TestSortJumpsToTop(t *testing.T) {
+	many := make([]proc.Process, 100)
+	for i := range many {
+		many[i] = proc.Process{PID: i + 1, Command: "proc", CPU: float64(100 - i), RSS: uint64(i)}
+	}
+	m := testModel(t, many)
+	m = press(t, m, "G") // scroll to the bottom
+	if m.offset == 0 {
+		t.Fatal("the list did not scroll")
+	}
+
+	m = press(t, m, "m")
+	if m.cursor != 0 || m.offset != 0 {
+		t.Errorf("after sorting: cursor=%d offset=%d, want 0 and 0", m.cursor, m.offset)
+	}
+	if got, _ := m.selected(); got.PID != m.rows[0].proc.PID || m.selectedPID != got.PID {
+		t.Errorf("selection = %d, want the new first row %d", m.selectedPID, m.rows[0].proc.PID)
+	}
+
+	// The next refresh must not drag the view back to the old process.
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: many}})
+	if m = next.(Model); m.offset != 0 || m.cursor != 0 {
+		t.Errorf("after the next refresh: cursor=%d offset=%d, want 0 and 0", m.cursor, m.offset)
+	}
+}
+
+// TestReverseAlsoJumpsToTop covers pressing the active column again.
+func TestReverseAlsoJumpsToTop(t *testing.T) {
+	m := testModel(t, sample())
+	m = press(t, m, "G", "c")
+	if m.cursor != 0 || m.offset != 0 {
+		t.Errorf("reversing left cursor=%d offset=%d, want 0 and 0", m.cursor, m.offset)
 	}
 }
 

@@ -58,8 +58,10 @@ spy -version
 | `x` | envia SIGTERM ao processo selecionado, com confirmação `y/N` |
 | `q` / `Esc` / `Ctrl+C` | sai |
 
-O cursor acompanha o processo, não a posição: reordenar ou atualizar a lista não muda
-a seleção. No modo árvore, um filtro mantém também os processos-pai do que casou, para
+O cursor acompanha o processo, não a posição: uma atualização da lista não muda a
+seleção nem faz a tela pular. Já ao ordenar, a tela volta para a primeira linha — a
+ideia é ver quem está no topo agora, então a seleção passa para o novo primeiro
+processo. No modo árvore, um filtro mantém também os processos-pai do que casou, para
 a hierarquia continuar legível.
 
 ## Como funciona
