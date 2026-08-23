@@ -1,0 +1,14 @@
+# Build artifacts
+bin/
+dist/
+spy
+
+# Test and coverage output
+*.test
+*.out
+coverage.html
+
+# Editors
+.idea/
+.vscode/
+*.swp
