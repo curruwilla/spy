@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      # Create the GitHub Release and upload the archives, packages and SBOMs.
+      contents: write
+      # Keyless cosign: mint the OIDC token that identifies this workflow.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # GoReleaser needs the full history to build the changelog.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      # Pinned to an exact version: cosign-installer stopped publishing a
+      # moving major tag after v3, so `@v4` does not resolve.
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

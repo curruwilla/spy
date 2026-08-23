@@ -1,0 +1,123 @@
+version: 2
+
+project_name: spy
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: spy
+    main: ./cmd/spy
+    binary: spy
+    env:
+      - CGO_ENABLED=0
+    # spy reads /proc directly, so Linux is the only target that runs.
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      # `version` lives in package main, the same variable `make build` stamps.
+      - -s -w
+      - -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: spy
+    ids:
+      - spy
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+nfpms:
+  - id: spy
+    ids:
+      - spy
+    package_name: spy
+    vendor: spy
+    homepage: https://github.com/curruwilla/spy
+    maintainer: William Alvares <curruwilla@gmail.com>
+    description: |-
+      Terminal system monitor: CPU, memory and processes on one screen,
+      reading /proc directly.
+    section: utils
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/spy/README.md
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  # One SPDX document per archive and per Linux package: every Go module that
+  # went into the binary, with its version, so an operator can answer "is this
+  # install affected?" without rebuilding anything.
+  - id: archive
+    artifacts: archive
+    documents:
+      - "${artifact}.spdx.json"
+    args:
+      - $artifact
+      - --output
+      - spdx-json=$document
+  - id: package
+    artifacts: package
+    documents:
+      - "${artifact}.spdx.json"
+    args:
+      - $artifact
+      - --output
+      - spdx-json=$document
+
+signs:
+  # Keyless cosign: the signature is bound to the GitHub Actions identity of
+  # this workflow, and recorded in the public Rekor transparency log. There is
+  # no private key to store or rotate. Signing checksums.txt covers every
+  # artifact listed in it.
+  - id: checksums
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+    output: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^style:"
+
+release:
+  # A tag such as v0.1.0-rc1 is published as a pre-release.
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```bash
+    tar -xzf spy_{{ .Version }}_linux_amd64.tar.gz spy
+    sudo install -m 0755 spy /usr/local/bin/spy
+    ```
