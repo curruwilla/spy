@@ -50,10 +50,10 @@ type Model struct {
 	mode    mode
 	input   string // what is being typed at the threshold prompt
 
-	cursor      int // index into rows
-	offset      int // first visible row, for scrolling
-	selectedPID int // follows the process under the cursor across refreshes
+	cursor int // index into rows, kept where the user left it
+	offset int // first visible row, for scrolling
 
+	info    proc.Process // process the detail panel describes, fixed when it opened
 	confirm proc.Process // process awaiting a kill confirmation
 	status  string       // one-off message shown in the footer
 }
@@ -181,8 +181,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// instead of retyped.
 		m.mode, m.input = modeThreshold, m.filter.min.String()
 	case "i":
-		if _, ok := m.selected(); ok {
-			m.mode = modeInfo
+		// The panel is about the process that was under the cursor at this
+		// keypress, not about whatever the cursor points at later.
+		if p, ok := m.selected(); ok {
+			m.info, m.mode = p, modeInfo
 		}
 	case "x":
 		if p, ok := m.selected(); ok {
@@ -289,21 +291,15 @@ func (m *Model) sortBy(key sortKey) {
 }
 
 // jumpToTop parks the cursor on the first row. The point of a re-sort is to
-// see what is now at the top, so the selection moves to the new first
-// process instead of the list scrolling off to wherever the old one went.
+// see what is now at the top, so the view goes back to the first line
+// instead of staying wherever the list was scrolled to.
 func (m *Model) jumpToTop() {
 	m.cursor, m.offset = 0, 0
-	if p, ok := m.selected(); ok {
-		m.selectedPID = p.PID
-	}
 }
 
 func (m *Model) moveCursor(delta int) {
 	m.cursor += delta
 	m.clampView()
-	if p, ok := m.selected(); ok {
-		m.selectedPID = p.PID
-	}
 }
 
 func (m Model) selected() (proc.Process, bool) {
@@ -317,31 +313,31 @@ func (m Model) selected() (proc.Process, bool) {
 // the filter, sort and view settings.
 func (m *Model) rebuild() {
 	m.rows = buildRows(m.snap.Processes, m.sort, m.reverse, m.filter, m.tree)
-	m.followSelection()
 	m.clampView()
-	// The panel reads the row under the cursor on every frame, so a refresh
-	// that empties the table leaves it with nothing to describe.
-	if m.mode == modeInfo && len(m.rows) == 0 {
-		m.mode = modeNormal
+	if m.mode == modeInfo {
+		m.refreshInfo()
 	}
 }
 
-// followSelection keeps the cursor on the same process when the list is
-// reordered or refreshed underneath it.
-func (m *Model) followSelection() {
-	if m.selectedPID == 0 {
-		return
-	}
-	for i, r := range m.rows {
-		if r.proc.PID == m.selectedPID {
-			m.cursor = i
+// refreshInfo re-reads the process the panel is pinned to, so its numbers
+// keep ticking while the panel stays on the same pid. The filter and the
+// sort do not apply here: the panel is about one process, whether or not
+// the table still lists it. A pid that is gone has nothing left to show,
+// so the panel closes and says so.
+func (m *Model) refreshInfo() {
+	for _, p := range m.snap.Processes {
+		if p.PID == m.info.PID {
+			m.info = p
 			return
 		}
 	}
+	m.mode = modeNormal
+	m.status = fmt.Sprintf("%d exited", m.info.PID)
 }
 
 // clampView keeps the cursor inside the list and the scroll window around
-// the cursor.
+// the cursor. The cursor holds its line: a refresh only pulls it back when
+// the list got short enough that the line no longer exists.
 func (m *Model) clampView() {
 	if len(m.rows) == 0 {
 		m.cursor, m.offset = 0, 0

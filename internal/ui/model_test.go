@@ -70,27 +70,44 @@ func TestTabCyclesColumns(t *testing.T) {
 	}
 }
 
-// TestCursorFollowsProcessAcrossRefresh is the reason the model tracks a
-// pid instead of an index: a refresh must not move the highlight to another
-// process.
-func TestCursorFollowsProcessAcrossRefresh(t *testing.T) {
+// TestCursorHoldsPositionAcrossRefresh is the rule for the highlight: it
+// stays on the line the user left it on, whatever process ends up there
+// after the list is reordered by a refresh.
+func TestCursorHoldsPositionAcrossRefresh(t *testing.T) {
 	m := testModel(t, sample())
 	m = press(t, m, "j", "j") // third row by cpu: pid 20
 	if got, _ := m.selected(); got.PID != 20 {
 		t.Fatalf("cursor on pid %d, want 20", got.PID)
 	}
 
-	// The next snapshot has pid 20 busiest, so it moves to the top.
+	// The next snapshot has pid 20 busiest, so it moves to the top and
+	// another process takes the third row.
 	refreshed := sample()
 	refreshed[3].CPU = 99
 	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: refreshed}})
 	m = next.(Model)
 
-	if got, _ := m.selected(); got.PID != 20 {
-		t.Errorf("after a refresh the cursor moved to pid %d, want 20", got.PID)
+	if m.cursor != 2 {
+		t.Errorf("cursor index = %d, want 2 (the line the user picked)", m.cursor)
 	}
-	if m.cursor != 0 {
-		t.Errorf("cursor index = %d, want 0 (pid 20 is now first)", m.cursor)
+	if got, _ := m.selected(); got.PID != m.rows[2].proc.PID || got.PID == 20 {
+		t.Errorf("cursor followed pid %d instead of staying on the third row", got.PID)
+	}
+}
+
+// TestCursorClampsWhenTheListShrinks covers the one case that does move the
+// cursor: the line it sits on stops existing.
+func TestCursorClampsWhenTheListShrinks(t *testing.T) {
+	m := testModel(t, sample())
+	m = press(t, m, "G")
+	if m.cursor != len(m.rows)-1 {
+		t.Fatalf("cursor = %d, want the last row", m.cursor)
+	}
+
+	shorter := sample()[:2]
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: shorter}})
+	if m = next.(Model); m.cursor != len(m.rows)-1 {
+		t.Errorf("cursor = %d, want the new last row %d", m.cursor, len(m.rows)-1)
 	}
 }
 
@@ -112,11 +129,11 @@ func TestSortJumpsToTop(t *testing.T) {
 	if m.cursor != 0 || m.offset != 0 {
 		t.Errorf("after sorting: cursor=%d offset=%d, want 0 and 0", m.cursor, m.offset)
 	}
-	if got, _ := m.selected(); got.PID != m.rows[0].proc.PID || m.selectedPID != got.PID {
-		t.Errorf("selection = %d, want the new first row %d", m.selectedPID, m.rows[0].proc.PID)
+	if got, _ := m.selected(); got.PID != m.rows[0].proc.PID {
+		t.Errorf("selection = %d, want the new first row %d", got.PID, m.rows[0].proc.PID)
 	}
 
-	// The next refresh must not drag the view back to the old process.
+	// The next refresh must leave the cursor on that first line.
 	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: many}})
 	if m = next.(Model); m.offset != 0 || m.cursor != 0 {
 		t.Errorf("after the next refresh: cursor=%d offset=%d, want 0 and 0", m.cursor, m.offset)
@@ -340,6 +357,65 @@ func TestInfoPanelIgnoresOtherKeys(t *testing.T) {
 	m = press(t, m, "j", "m", "/", "x")
 	if m.mode != modeInfo || m.cursor != before {
 		t.Errorf("mode=%v cursor=%d, want the panel untouched at %d", m.mode, m.cursor, before)
+	}
+}
+
+// TestInfoPanelStaysOnItsProcess pins the panel to the pid that was under
+// the cursor when i was pressed: a refresh that reorders the table must not
+// swap the panel for another process.
+func TestInfoPanelStaysOnItsProcess(t *testing.T) {
+	m := press(t, testModel(t, sample()), "j") // second row by cpu: pid 10
+	m = press(t, m, "i")
+	if m.info.PID != 10 {
+		t.Fatalf("panel opened on pid %d, want 10", m.info.PID)
+	}
+
+	// pid 20 becomes the busiest, so the second row is now somebody else.
+	refreshed := sample()
+	refreshed[3].CPU = 99
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: refreshed}})
+	m = next.(Model)
+
+	if m.mode != modeInfo || m.info.PID != 10 {
+		t.Errorf("after a refresh the panel shows pid %d in mode %v, want pid 10 still open", m.info.PID, m.mode)
+	}
+	if !strings.Contains(m.View(), "process 10") {
+		t.Error("the panel should still be drawing pid 10")
+	}
+}
+
+// TestInfoPanelKeepsItsNumbersFresh is the other half of pinning: the pid
+// is fixed, its values are not.
+func TestInfoPanelKeepsItsNumbersFresh(t *testing.T) {
+	m := press(t, testModel(t, sample()), "i") // busiest row: pid 11
+	if m.info.PID != 11 {
+		t.Fatalf("panel opened on pid %d, want 11", m.info.PID)
+	}
+
+	refreshed := sample()
+	refreshed[2].CPU = 42.5
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: refreshed}})
+	if m = next.(Model); m.info.CPU != 42.5 {
+		t.Errorf("panel cpu = %v, want the refreshed 42.5", m.info.CPU)
+	}
+}
+
+// TestInfoPanelClosesWhenTheProcessExits covers the pid disappearing: there
+// is nothing left to describe, so the panel goes away and the footer says
+// why.
+func TestInfoPanelClosesWhenTheProcessExits(t *testing.T) {
+	m := press(t, testModel(t, sample()), "i") // pid 11
+
+	survivors := append([]proc.Process(nil), sample()[:2]...)
+	survivors = append(survivors, sample()[3])
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: survivors}})
+	m = next.(Model)
+
+	if m.mode != modeNormal {
+		t.Errorf("mode = %v, want normal after the process exited", m.mode)
+	}
+	if m.status != "11 exited" {
+		t.Errorf("status = %q, want the reason the panel closed", m.status)
 	}
 }
 

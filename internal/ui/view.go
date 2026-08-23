@@ -172,12 +172,7 @@ const (
 // of them together would have.
 func (m Model) viewInfo() []string {
 	height := m.tableHeight() + 1
-	p, ok := m.selected()
-	if !ok {
-		return blankLines(height)
-	}
-
-	panel := strings.Split(m.infoPanel(p, height), "\n")
+	panel := strings.Split(m.infoPanel(m.info, height), "\n")
 	if len(panel) > height {
 		panel = panel[:height] // a terminal too short even for the trimmed box
 	}

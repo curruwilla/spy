@@ -81,11 +81,17 @@ O sinal é decoração: `cpu>5`, `cpu>=5`, `cpu 5` e `cpu=5` são a mesma coisa,
 outra. O campo já abre preenchido com o que está ativo, para editar em vez de redigitar,
 e o texto do `/` continua valendo em conjunto: os dois filtros se somam.
 
-O cursor acompanha o processo, não a posição: uma atualização da lista não muda a
-seleção nem faz a tela pular. Já ao ordenar, a tela volta para a primeira linha — a
-ideia é ver quem está no topo agora, então a seleção passa para o novo primeiro
-processo. No modo árvore, um filtro mantém também os processos-pai do que casou, para
-a hierarquia continuar legível — vale tanto para o texto quanto para os limites.
+O painel do `i` fica preso no PID que estava sob o cursor na hora que você apertou:
+a lista continua se reordenando atrás dele, mas o painel não troca de processo — só
+os números dele se atualizam. Se o processo terminar, o painel fecha e o rodapé diz
+qual PID saiu.
+
+O cursor fica na posição, não no processo: ele permanece na linha onde você o deixou,
+e uma atualização da lista não o arrasta atrás do processo que estava selecionado —
+só o traz de volta se a lista encurtar e aquela linha deixar de existir. Já ao
+ordenar, a tela volta para a primeira linha — a ideia é ver quem está no topo agora.
+No modo árvore, um filtro mantém também os processos-pai do que casou, para a
+hierarquia continuar legível — vale tanto para o texto quanto para os limites.
 
 ## Como funciona
 
