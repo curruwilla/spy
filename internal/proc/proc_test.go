@@ -71,6 +71,14 @@ func TestCollectProcessFields(t *testing.T) {
 	if want := "[kworker/0:1]"; byPID[7].Command != want {
 		t.Errorf("pid 7 Command = %q, want %q", byPID[7].Command, want)
 	}
+	// They hang off kthreadd, which is how they are told apart from
+	// anything a user started.
+	if !byPID[7].Kernel {
+		t.Errorf("pid 7 is a child of kthreadd, want it marked as a kernel thread")
+	}
+	if byPID[1234].Kernel {
+		t.Errorf("pid 1234 has a command line of its own, want it not marked as a kernel thread")
+	}
 }
 
 // TestCollectCPUDelta feeds the collector two readings by hand, because the

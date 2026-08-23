@@ -4,19 +4,26 @@ Monitor de sistema para o terminal. CPU, memória, processos, ordenação e árv
 processos — tudo consolidado em uma tela só.
 
 ```
-spy  up 1d 15h  ·  12 cores  ·  524 procs, 6 running                             00:53:47
-CPU  ████████████░░░░░░░░░░░░░░░░░░  40%  load 1.80 1.41 1.07
-core ▅▄▄▃▃▃▅▄▃▅▃▃
-MEM  ███████████████░░░░░░░░░░░░░░░  51%  15.9G / 31.2G
-SWP  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%  disabled
-    PID USER      S CPU%▼  MEM%    RSS     TIME COMMAND
-1499706 will      S 117.5   2.2   698M     0:08 /opt/google/chrome/chrome --type=renderer
- 996680 will      S  94.9   2.5   814M    15:01 /opt/google/chrome/chrome
- 271282 will      S  13.6   2.2   693M    20:12 /usr/bin/warp-terminal
-    357 root      S   9.0   0.0     0B     0:31 [jbd2/nvme0n1p3-8]
-   5118 will      S   9.0   2.0   635M    52:17 /usr/bin/gnome-shell
-↑↓ move · c/m/p/n sort · tab column · t tree · / filter · l min · x kill · q quit sort cpu
+  spy   up 1d 15h   ·   12 cores   ·   524 procs, 6 running                       00:53:47
+
+  core  [▅▄▄▃ ▂▃▅▄ ▃▅▂▃]
+  CPU   [▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ · · · · · · · · · · · · · · ·]   40%     load 1.80  1.41  1.07
+
+  MEM   [▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ ▇ · · · · · · · · · · · ·]   51%     used 15.9G of 31.2G
+  SWP   [· · · · · · · · · · · · · · · · · · · · · · · ·]    0%     used swap disabled
+
+      PID USER      S CPU%▼  MEM%    RSS     TIME COMMAND
+  1499706 will      S 117.5   2.2   698M     0:08 /opt/google/chrome/chrome --type=render…
+   996680 will      R  94.9   2.5   814M    15:01 /opt/google/chrome/chrome
+   271282 will      S  13.6   2.2   693M    20:12 /usr/bin/warp-terminal
+      357 root      D   9.0   0.0     0B     0:31 [jbd2/nvme0n1p3-8]
+     5118 will      S   9.0   2.0   635M    52:17 /usr/bin/gnome-shell
+     2210 postgres  S   0.3   5.4   1.7G     4:05 postgres: checkpointer
+      918 will      S   0.0   0.1    32M     0:02 zsh
+
+  ↑↓ move · c/m/p/n sort · / filter · t tree · i info · x kill · q quit           sort cpu
 ```
+
 
 ## Instalação
 
@@ -92,6 +99,22 @@ só o traz de volta se a lista encurtar e aquela linha deixar de existir. Já ao
 ordenar, a tela volta para a primeira linha — a ideia é ver quem está no topo agora.
 No modo árvore, um filtro mantém também os processos-pai do que casou, para a
 hierarquia continuar legível — vale tanto para o texto quanto para os limites.
+
+## Lendo a tela
+
+Nem tudo na lista merece a mesma atenção, então a linha diz sozinha o que é o quê:
+
+| Marca | Significa |
+| --- | --- |
+| linha inteira apagada | thread do kernel (filha do `kthreadd`, pid 2) — encanamento da máquina, nunca é o que você procura |
+| dono em destaque | processo da sua conta; os das outras contas ficam em cinza |
+| comando em negrito | está fazendo alguma coisa agora: rodando, ≥ 1% de CPU ou ≥ 5% da RAM |
+| `S` colorido | `R` verde está num núcleo, `D` amarelo travado em syscall, `T` parado, `Z` vermelho é zumbi |
+| `CPU%` colorido | verde até 50%, amarelo até 80%, vermelho acima |
+
+As barras de CPU, memória e swap usam a mesma escala de cor; as três linhas de fundo
+preenchido (título, cabeçalho da tabela e rodapé) seguem o tema claro ou escuro do
+terminal.
 
 ## Como funciona
 

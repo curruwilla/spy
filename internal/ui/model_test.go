@@ -595,6 +595,134 @@ func TestViewFillsTheTerminal(t *testing.T) {
 	}
 }
 
+// TestHeaderSeparatesItsGroups covers the blank lines in the header: the
+// margin above the title, and the ones that keep the cpu block from
+// reading as part of the memory one below it. A short terminal keeps the
+// blank between the two blocks and gives the rest back to the table.
+func TestHeaderSeparatesItsGroups(t *testing.T) {
+	cases := []struct {
+		name   string
+		height int
+		blanks []int // header lines expected to be empty
+	}{
+		{"tall", 30, []int{0, 2, 5, 8}},
+		{"compact", compactHeight - 1, []int{3}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := testModel(t, sample())
+			m.height = c.height
+			m.clampView()
+
+			lines := m.viewHeader()
+			// The column titles are the last header line and are drawn by
+			// the table, not by the header itself.
+			if len(lines) != m.headerHeight()-1 {
+				t.Fatalf("header has %d lines, want %d", len(lines), m.headerHeight()-1)
+			}
+			var blanks []int
+			for i, line := range lines {
+				if strings.TrimSpace(line) == "" {
+					blanks = append(blanks, i)
+				}
+			}
+			if fmt.Sprint(blanks) != fmt.Sprint(c.blanks) {
+				t.Errorf("blank lines at %v, want %v:\n%s", blanks, c.blanks, strings.Join(lines, "\n"))
+			}
+			// The blank both layouts keep is the one between the cpu block
+			// and the memory gauges.
+			separated := false
+			for _, i := range blanks {
+				separated = separated || i > 0 && i+1 < len(lines) &&
+					strings.Contains(lines[i-1], "CPU") && strings.Contains(lines[i+1], "MEM")
+			}
+			if !separated {
+				t.Errorf("nothing separates the cpu block from the memory one:\n%s", strings.Join(lines, "\n"))
+			}
+			if got := len(strings.Split(m.View(), "\n")); got != c.height {
+				t.Errorf("view has %d lines, want exactly %d", got, c.height)
+			}
+		})
+	}
+}
+
+// TestBarsFillTheWholeLine covers the three filled lines — the title, the
+// column titles and the footer. Their background has to reach both edges
+// of the screen: a bar that stops where its text ends looks like a stray
+// highlight rather than a bar.
+func TestBarsFillTheWholeLine(t *testing.T) {
+	base := testModel(t, sample())
+	base.width, base.height = 100, 30
+	base.clampView()
+
+	filtering := base
+	filtering.mode, filtering.filter.text = modeFilter, "fire"
+
+	refused := base
+	refused.mode, refused.input, refused.status = modeThreshold, "cpu>x", "unknown threshold"
+
+	confirming := base
+	confirming.mode, confirming.confirm = modeConfirm, sample()[0]
+
+	failed := base
+	failed.err = errFake
+
+	noted := base
+	noted.status = "SIGTERM sent to 10"
+
+	informing := base
+	informing.mode = modeInfo
+
+	cases := []struct{ name, line string }{
+		{"title", base.viewTitle()},
+		{"column titles", base.viewColumns()},
+		{"footer", base.viewFooter()},
+		{"filter prompt", filtering.viewFooter()},
+		{"refused threshold", refused.viewFooter()},
+		{"kill confirmation", confirming.viewFooter()},
+		{"refresh error", failed.viewFooter()},
+		{"status message", noted.viewFooter()},
+		{"open panel", informing.viewFooter()},
+	}
+	for _, c := range cases {
+		if w := lipgloss.Width(c.line); w != base.inner() {
+			t.Errorf("the %s bar is %d columns wide, want the full %d: %q",
+				c.name, w, base.inner(), c.line)
+		}
+	}
+}
+
+// TestScreenKeepsItsMargins covers the gutter: nothing is drawn against
+// the edges of the terminal, and a screen tall enough for it keeps a blank
+// line above the title too.
+func TestScreenKeepsItsMargins(t *testing.T) {
+	sizes := []struct{ width, height int }{{120, 30}, {100, 24}, {80, 20}}
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			m := testModel(t, sample())
+			m.width, m.height = size.width, size.height
+			m.clampView()
+
+			lines := strings.Split(m.View(), "\n")
+			if top := m.height >= compactHeight; top != (lines[0] == "") {
+				t.Errorf("first line = %q, want a blank one above the title: %v", lines[0], top)
+			}
+			for i, line := range lines {
+				if line == "" {
+					continue // an empty line carries no trailing spaces
+				}
+				if !strings.HasPrefix(line, strings.Repeat(" ", gutter)) {
+					t.Errorf("line %d starts at the left edge: %q", i, line)
+				}
+				if w := lipgloss.Width(line); w > size.width-gutter {
+					t.Errorf("line %d is %d cells wide, want at most %d: %q",
+						i, w, size.width-gutter, line)
+				}
+			}
+		})
+	}
+}
+
 func TestViewWithoutMatchesExplainsItself(t *testing.T) {
 	m := testModel(t, sample())
 	m = press(t, m, "/", "z", "z", "z")

@@ -25,7 +25,12 @@ type Process struct {
 	Nice    int
 	Threads int
 	Command string
+	Kernel  bool // a kernel thread: no command line of its own, no user code
 }
+
+// kthreaddPID is the kernel thread daemon, which every kernel thread hangs
+// off. It is pid 2 on every Linux build.
+const kthreaddPID = 2
 
 // readProcesses walks /proc and builds one Process per numeric entry.
 // Processes that exit while being read are skipped, not reported as errors.
@@ -90,6 +95,7 @@ func (c *Collector) readProcess(pid int, memTotal uint64, uptime time.Duration) 
 		Nice:    st.nice,
 		Threads: st.threads,
 		Command: c.command(pid, st.comm),
+		Kernel:  pid == kthreaddPID || st.ppid == kthreaddPID,
 	}
 	return p, st.busyTicks(), nil
 }

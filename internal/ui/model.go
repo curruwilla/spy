@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os/user"
 	"syscall"
 	"time"
 
@@ -31,6 +32,17 @@ type Options struct {
 	Min      string // threshold clauses, e.g. "cpu>5 mem>500M time>1m"
 }
 
+// currentUser is the account the monitor runs under, read once: it is how
+// a row tells the reader's own processes from everyone else's, and it
+// cannot change while the program runs.
+func currentUser() string {
+	u, err := user.Current()
+	if err != nil {
+		return ""
+	}
+	return u.Username
+}
+
 // Model is the whole application state.
 type Model struct {
 	collector *proc.Collector
@@ -53,6 +65,7 @@ type Model struct {
 	cursor int // index into rows, kept where the user left it
 	offset int // first visible row, for scrolling
 
+	me      string       // account the monitor runs under, to mark its own processes
 	info    proc.Process // process the detail panel describes, fixed when it opened
 	confirm proc.Process // process awaiting a kill confirmation
 	status  string       // one-off message shown in the footer
@@ -72,6 +85,7 @@ func New(c *proc.Collector, opts Options) (Model, error) {
 	return Model{
 		collector: c,
 		interval:  opts.Interval,
+		me:        currentUser(),
 		sort:      key,
 		tree:      opts.Tree,
 		filter:    filter{text: opts.Filter, min: min},
@@ -356,7 +370,7 @@ func (m *Model) clampView() {
 
 // tableHeight is the terminal minus the fixed header and footer.
 func (m Model) tableHeight() int {
-	return max(1, m.height-headerHeight-footerHeight)
+	return max(1, m.height-m.headerHeight()-footerHeight)
 }
 
 // Run starts the monitor and blocks until the user quits. The extra program
