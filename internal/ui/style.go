@@ -18,6 +18,13 @@ var (
 	styleWarn     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleAlert    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
 	styleKey      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+
+	// The detail panel sits on top of the table, so it is drawn with a
+	// border to separate it from what is left of the screen.
+	styleInfoBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("6")).
+			Padding(0, 1)
 )
 
 // heat colors a measurement by how alarming it is: calm below half, warm up

@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/curruwilla/spy/internal/proc"
 )
 
@@ -290,6 +292,184 @@ func TestKillAsksForConfirmation(t *testing.T) {
 	m = press(t, m, "n")
 	if m.mode != modeNormal || !strings.Contains(m.status, "cancelled") {
 		t.Errorf("anything but y cancels, got mode=%v status=%q", m.mode, m.status)
+	}
+}
+
+// detailed is one process with every field the panel shows filled in.
+func detailed() []proc.Process {
+	return []proc.Process{{
+		PID: 1234, PPID: 7, User: "root", State: "S",
+		CPU: 12.5, Mem: 2.1, RSS: 48 << 20, VSize: 1180 << 20,
+		CPUTime: 83 * time.Second, Uptime: 3 * time.Hour, Nice: 19, Threads: 4,
+		Command: "/usr/sbin/nginx -g daemon off;",
+	}}
+}
+
+// TestInfoPanelToggles covers the one key doing both jobs: i opens the
+// panel and the same i closes it again.
+func TestInfoPanelToggles(t *testing.T) {
+	for _, close := range []string{"i", "esc", "q"} {
+		t.Run(close, func(t *testing.T) {
+			m := press(t, testModel(t, sample()), "i")
+			if m.mode != modeInfo {
+				t.Fatalf("i left mode %v, want the info panel", m.mode)
+			}
+
+			var msg tea.KeyMsg
+			if close == "esc" {
+				msg = tea.KeyMsg{Type: tea.KeyEsc}
+			} else {
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(close)}
+			}
+			next, cmd := m.Update(msg)
+			if m = next.(Model); m.mode != modeNormal {
+				t.Errorf("%q left mode %v, want normal", close, m.mode)
+			}
+			if cmd != nil {
+				t.Errorf("%q should close the panel, not quit", close)
+			}
+		})
+	}
+}
+
+// TestInfoPanelIgnoresOtherKeys keeps the panel from acting on a table it
+// is covering: only the closing keys do anything.
+func TestInfoPanelIgnoresOtherKeys(t *testing.T) {
+	m := press(t, testModel(t, sample()), "i")
+	before := m.cursor
+	m = press(t, m, "j", "m", "/", "x")
+	if m.mode != modeInfo || m.cursor != before {
+		t.Errorf("mode=%v cursor=%d, want the panel untouched at %d", m.mode, m.cursor, before)
+	}
+}
+
+func TestInfoPanelNeedsAProcess(t *testing.T) {
+	m := testModel(t, sample())
+	m = press(t, m, "/", "z", "z", "z") // nothing matches
+	done, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = press(t, done.(Model), "i")
+	if m.mode == modeInfo {
+		t.Error("i opened a panel with no process under the cursor")
+	}
+}
+
+// TestInfoPanelShowsWhatTheTableCannot is the point of the panel: the
+// fields the table has no column for.
+func TestInfoPanelShowsWhatTheTableCannot(t *testing.T) {
+	m := press(t, testModel(t, detailed()), "i")
+	view := m.View()
+
+	for _, want := range []string{
+		"process 1234",
+		"/usr/sbin/nginx -g daemon off;", // the full command, not truncated
+		"S sleeping",                     // the state letter spelled out
+		"parent", "7",
+		"threads", "4",
+		"nice", "19",
+		"virtual", "1.2G",
+		"running", "3h 0m",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the panel is missing %q", want)
+		}
+	}
+	if strings.Contains(view, "COMMAND") {
+		t.Error("the panel should replace the table, not sit next to its titles")
+	}
+}
+
+// TestInfoPanelShowsTheWholeCommand covers the reason the command has a
+// block of its own: it is the field worth opening the panel for, and it is
+// far too long for a single line.
+func TestInfoPanelShowsTheWholeCommand(t *testing.T) {
+	const command = "/opt/google/chrome/chrome --type=renderer --crashpad-handler-pid=14938 " +
+		"--enable-crash-reporter=,stable --change-stack-guard-on-fork=enable --lang=en-US " +
+		"--num-raster-threads=4 --enable-main-frame-before-activation --renderer-client-id=412"
+
+	procs := detailed()
+	procs[0].Command = command
+	m := testModel(t, procs)
+	m.width, m.height = 120, 30
+	m.clampView()
+	m = press(t, m, "i")
+	view := m.View()
+
+	for _, word := range strings.Fields(command) {
+		if !strings.Contains(view, word) {
+			t.Errorf("the panel dropped %q from the command", word)
+		}
+	}
+	if strings.Contains(view, "…") {
+		t.Error("the command was cut short on a screen with room for all of it")
+	}
+	if lines := strings.Count(view, "--"); lines == 0 {
+		t.Error("the command is not on screen at all")
+	}
+}
+
+// TestInfoPanelWrapsRatherThanCuts covers a command too long even for the
+// widened panel: it wraps over several lines and only the tail is marked.
+func TestInfoPanelWrapsRatherThanCuts(t *testing.T) {
+	procs := detailed()
+	procs[0].Command = strings.Repeat("/some/very/long/path/to/a/binary ", 40)
+	m := testModel(t, procs)
+	m.width, m.height = 90, 24
+	m.clampView()
+	m = press(t, m, "i")
+
+	body := strings.Join(m.viewInfo(), "\n")
+	if got := strings.Count(body, "/some/very/long/path/to/a/binary"); got < 4 {
+		t.Errorf("the command occupies %d copies of the path, want it wrapped over several lines", got)
+	}
+	if !strings.Contains(body, "…") {
+		t.Error("a command that does not fit should say that there is more of it")
+	}
+}
+
+// TestInfoPanelKeepsTheLayout covers the fixed screen height: the panel
+// takes the table's lines, it does not add any.
+func TestInfoPanelKeepsTheLayout(t *testing.T) {
+	sizes := []struct{ width, height int }{{100, 24}, {80, 20}, {62, 16}, {40, 12}, {30, 9}}
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			m := testModel(t, detailed())
+			m.width, m.height = size.width, size.height
+			m.clampView()
+			m = press(t, m, "i")
+
+			for i, line := range m.viewInfo() {
+				if w := lipgloss.Width(line); w > size.width {
+					t.Errorf("panel line %d is %d cells wide, want at most %d", i, w, size.width)
+				}
+			}
+			if got := len(strings.Split(m.View(), "\n")); got != size.height {
+				t.Errorf("view has %d lines, want exactly %d", got, size.height)
+			}
+		})
+	}
+}
+
+// TestInfoPanelClosesWhenTheProcessGoes covers a refresh emptying the list
+// underneath an open panel: it has nothing left to describe.
+func TestInfoPanelClosesWhenTheProcessGoes(t *testing.T) {
+	m := press(t, testModel(t, sample()), "i")
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{}})
+	if m = next.(Model); m.mode != modeNormal {
+		t.Errorf("mode = %v, want normal once there is no process left", m.mode)
+	}
+}
+
+// TestFooterHelpFitsTheWidth covers the footer dropping hints instead of
+// wrapping, which would push the bottom line off the screen.
+func TestFooterHelpFitsTheWidth(t *testing.T) {
+	for _, width := range []int{120, 80, 60, 40, 20, 8} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := testModel(t, sample())
+			m.width = width
+			if got := lipgloss.Width(m.viewFooter()); got > width {
+				t.Errorf("footer is %d cells wide, want at most %d", got, width)
+			}
+		})
 	}
 }
 

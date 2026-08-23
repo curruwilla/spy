@@ -11,12 +11,17 @@ func TestParseStat(t *testing.T) {
 		{
 			name: "plain command",
 			line: "42 (bash) S 7 42 42 0 -1 4194304 100 0 0 0 250 150 0 0 20 0 4 0 900 123 2048" + tail(),
-			want: stat{comm: "bash", state: "S", ppid: 7, utime: 250, stime: 150, threads: 4, rssPages: 2048},
+			want: stat{comm: "bash", state: "S", ppid: 7, utime: 250, stime: 150, threads: 4, startTicks: 900, vsize: 123, rssPages: 2048},
 		},
 		{
 			name: "command with spaces and parens",
 			line: "42 (my prog (test)) R 1 42 42 0 -1 0 0 0 0 0 10 5 0 0 20 0 2 0 900 123 64" + tail(),
-			want: stat{comm: "my prog (test)", state: "R", ppid: 1, utime: 10, stime: 5, threads: 2, rssPages: 64},
+			want: stat{comm: "my prog (test)", state: "R", ppid: 1, utime: 10, stime: 5, threads: 2, startTicks: 900, vsize: 123, rssPages: 64},
+		},
+		{
+			name: "renamed process",
+			line: "42 (batch) S 1 42 42 0 -1 0 0 0 0 0 1 2 0 0 39 19 1 0 4200 8192 16" + tail(),
+			want: stat{comm: "batch", state: "S", ppid: 1, utime: 1, stime: 2, nice: 19, threads: 1, startTicks: 4200, vsize: 8192, rssPages: 16},
 		},
 	}
 	for _, c := range cases {

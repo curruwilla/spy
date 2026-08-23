@@ -85,7 +85,7 @@ func (c *Collector) Collect() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read uptime: %w", err)
 	}
-	procs, err := c.readProcesses(mem.Total, elapsed)
+	procs, err := c.readProcesses(mem.Total, uptime, elapsed)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read processes: %w", err)
 	}

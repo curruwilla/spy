@@ -70,3 +70,59 @@ func pad(s string, w int, right bool) string {
 		return s + strings.Repeat(" ", w-len(runes))
 	}
 }
+
+// wrapText breaks s into lines of at most w cells, at the spaces where it
+// can and mid-word where it must: a command line is mostly paths and flags
+// with nowhere convenient to break.
+func wrapText(s string, w int) []string {
+	if w <= 0 {
+		return nil
+	}
+	var lines []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		// A word with no break in it is cut into whole lines until what is
+		// left of it fits like any other.
+		for len([]rune(word)) > w {
+			if line != "" {
+				lines, line = append(lines, line), ""
+			}
+			runes := []rune(word)
+			lines, word = append(lines, string(runes[:w])), string(runes[w:])
+		}
+		switch {
+		case line == "":
+			line = word
+		case len([]rune(line))+1+len([]rune(word)) <= w:
+			line += " " + word
+		default:
+			lines, line = append(lines, line), word
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// stateNames spells out the single letter /proc reports for a process
+// state. See proc(5); anything the kernel adds later shows as the letter
+// on its own.
+var stateNames = map[string]string{
+	"R": "running",
+	"S": "sleeping",
+	"D": "disk wait",
+	"Z": "zombie",
+	"T": "stopped",
+	"t": "tracing stop",
+	"X": "dead",
+	"I": "idle",
+}
+
+// formatState renders a state letter with its meaning next to it.
+func formatState(s string) string {
+	if name, ok := stateNames[s]; ok {
+		return s + " " + name
+	}
+	return s
+}

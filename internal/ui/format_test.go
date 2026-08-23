@@ -78,3 +78,42 @@ func TestPad(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapText(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		width int
+		want  []string
+	}{
+		{"fits on one line", "spy -tree", 20, []string{"spy -tree"}},
+		{"breaks at spaces", "one two three four", 9, []string{"one two", "three", "four"}},
+		{"a word longer than the line is cut", "aaaaaaaa b", 4, []string{"aaaa", "aaaa", "b"}},
+		{"a long word flushes what came before", "ab cdefghij", 4, []string{"ab", "cdef", "ghij"}},
+		{"runs of spaces collapse", "one   two", 20, []string{"one two"}},
+		{"empty", "", 10, nil},
+		{"no width", "one two", 0, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := wrapText(c.in, c.width)
+			if len(got) != len(c.want) {
+				t.Fatalf("wrapText(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("line %d = %q, want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestFormatState(t *testing.T) {
+	cases := map[string]string{"S": "S sleeping", "R": "R running", "Z": "Z zombie", "?": "?"}
+	for in, want := range cases {
+		if got := formatState(in); got != want {
+			t.Errorf("formatState(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

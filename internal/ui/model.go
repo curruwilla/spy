@@ -9,8 +9,9 @@ import (
 	"github.com/curruwilla/spy/internal/proc"
 )
 
-// mode is what the footer is currently doing: showing help, reading a
-// filter or a set of thresholds, or asking to confirm a kill.
+// mode is what the screen is currently doing: showing the table, reading a
+// filter or a set of thresholds, asking to confirm a kill, or holding the
+// detail panel open over the table.
 type mode int
 
 const (
@@ -18,6 +19,7 @@ const (
 	modeFilter
 	modeThreshold
 	modeConfirm
+	modeInfo
 )
 
 // Options configures the monitor from the command line.
@@ -134,6 +136,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleThresholdKey(msg)
 	case modeConfirm:
 		return m.handleConfirmKey(msg)
+	case modeInfo:
+		return m.handleInfoKey(msg)
 	}
 
 	m.status = ""
@@ -176,6 +180,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Prefilled with what is already active, so it can be edited
 		// instead of retyped.
 		m.mode, m.input = modeThreshold, m.filter.min.String()
+	case "i":
+		if _, ok := m.selected(); ok {
+			m.mode = modeInfo
+		}
 	case "x":
 		if p, ok := m.selected(); ok {
 			m.confirm, m.mode = p, modeConfirm
@@ -255,6 +263,19 @@ func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleInfoKey holds the detail panel open until it is closed on purpose:
+// the same i that opened it, or esc. Everything else is swallowed, because
+// the table it would act on is not on screen.
+func (m Model) handleInfoKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "i", "esc", "q":
+		m.mode = modeNormal
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 // sortBy switches column, or flips the direction when the column is already
 // the active one. Re-sorting always shows the new top of the list.
 func (m *Model) sortBy(key sortKey) {
@@ -298,6 +319,11 @@ func (m *Model) rebuild() {
 	m.rows = buildRows(m.snap.Processes, m.sort, m.reverse, m.filter, m.tree)
 	m.followSelection()
 	m.clampView()
+	// The panel reads the row under the cursor on every frame, so a refresh
+	// that empties the table leaves it with nothing to describe.
+	if m.mode == modeInfo && len(m.rows) == 0 {
+		m.mode = modeNormal
+	}
 }
 
 // followSelection keeps the cursor on the same process when the list is

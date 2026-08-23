@@ -19,14 +19,19 @@ type Process struct {
 	CPU     float64 // percent of a single core, so it can exceed 100
 	Mem     float64 // percent of total RAM
 	RSS     uint64  // resident memory in bytes
+	VSize   uint64  // address space in bytes, almost always far above RSS
 	CPUTime time.Duration
+	Uptime  time.Duration // wall time since the process started
+	Nice    int
 	Threads int
 	Command string
 }
 
 // readProcesses walks /proc and builds one Process per numeric entry.
 // Processes that exit while being read are skipped, not reported as errors.
-func (c *Collector) readProcesses(memTotal uint64, elapsed float64) ([]Process, error) {
+// uptime is the machine's, and is what process start times are measured
+// against.
+func (c *Collector) readProcesses(memTotal uint64, uptime time.Duration, elapsed float64) ([]Process, error) {
 	dir, err := os.Open(c.root)
 	if err != nil {
 		return nil, err
@@ -45,7 +50,7 @@ func (c *Collector) readProcesses(memTotal uint64, elapsed float64) ([]Process, 
 		if err != nil {
 			continue // not a process directory
 		}
-		p, busy, err := c.readProcess(pid, memTotal)
+		p, busy, err := c.readProcess(pid, memTotal, uptime)
 		if err != nil {
 			continue // vanished mid-read
 		}
@@ -61,7 +66,7 @@ func (c *Collector) readProcesses(memTotal uint64, elapsed float64) ([]Process, 
 
 // readProcess reads one pid. It returns the process and its cumulative busy
 // ticks, which the caller diffs against the previous snapshot.
-func (c *Collector) readProcess(pid int, memTotal uint64) (Process, uint64, error) {
+func (c *Collector) readProcess(pid int, memTotal uint64, uptime time.Duration) (Process, uint64, error) {
 	data, err := os.ReadFile(c.path(strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return Process{}, 0, err
@@ -79,11 +84,25 @@ func (c *Collector) readProcess(pid int, memTotal uint64) (Process, uint64, erro
 		State:   st.state,
 		Mem:     percent(rss, memTotal),
 		RSS:     rss,
+		VSize:   st.vsize,
 		CPUTime: time.Duration(st.busyTicks()) * time.Second / userHZ,
+		Uptime:  processUptime(uptime, st.startTicks),
+		Nice:    st.nice,
 		Threads: st.threads,
 		Command: c.command(pid, st.comm),
 	}
 	return p, st.busyTicks(), nil
+}
+
+// processUptime turns a start time counted in ticks since boot into how
+// long the process has been running. A process that claims to have started
+// after the boot clock reads zero rather than a negative age.
+func processUptime(uptime time.Duration, startTicks uint64) time.Duration {
+	age := uptime - time.Duration(startTicks)*time.Second/userHZ
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 // processUser takes the owner from the directory itself, which is cheaper
@@ -113,13 +132,16 @@ func (c *Collector) command(pid int, comm string) string {
 
 // stat is the subset of /proc/<pid>/stat fields the monitor uses.
 type stat struct {
-	comm     string
-	state    string
-	ppid     int
-	utime    uint64
-	stime    uint64
-	threads  int
-	rssPages uint64
+	comm       string
+	state      string
+	ppid       int
+	utime      uint64
+	stime      uint64
+	nice       int
+	threads    int
+	startTicks uint64
+	vsize      uint64
+	rssPages   uint64
 }
 
 func (s stat) busyTicks() uint64 { return s.utime + s.stime }
@@ -127,11 +149,14 @@ func (s stat) busyTicks() uint64 { return s.utime + s.stime }
 // Field offsets counted from the state field, which is the first one after
 // the command name. See proc(5) for the full list.
 const (
-	statPPID     = 1
-	statUtime    = 11
-	statStime    = 12
-	statThreads  = 17
-	statRSSPages = 21
+	statPPID       = 1
+	statUtime      = 11
+	statStime      = 12
+	statNice       = 16
+	statThreads    = 17
+	statStartTicks = 19
+	statVSize      = 20
+	statRSSPages   = 21
 )
 
 // parseStat splits /proc/<pid>/stat. The command name is parenthesised and
@@ -152,9 +177,12 @@ func parseStat(data []byte) (stat, error) {
 
 	s.state = fields[0]
 	s.ppid, _ = strconv.Atoi(fields[statPPID])
+	s.nice, _ = strconv.Atoi(fields[statNice])
 	s.threads, _ = strconv.Atoi(fields[statThreads])
 	s.utime, _ = strconv.ParseUint(fields[statUtime], 10, 64)
 	s.stime, _ = strconv.ParseUint(fields[statStime], 10, 64)
+	s.startTicks, _ = strconv.ParseUint(fields[statStartTicks], 10, 64)
+	s.vsize, _ = strconv.ParseUint(fields[statVSize], 10, 64)
 	s.rssPages, _ = strconv.ParseUint(fields[statRSSPages], 10, 64)
 	return s, nil
 }

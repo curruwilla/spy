@@ -46,8 +46,16 @@ func TestCollectProcessFields(t *testing.T) {
 	}
 
 	user := byPID[1234]
-	if user.PPID != 7 || user.State != "S" || user.Threads != 4 {
+	if user.PPID != 7 || user.State != "S" || user.Threads != 4 || user.Nice != 0 {
 		t.Errorf("pid 1234 = %+v", user)
+	}
+	if user.VSize != 123456789 {
+		t.Errorf("pid 1234 VSize = %d, want 123456789", user.VSize)
+	}
+	// Started 900 ticks after boot, so it is that much younger than the
+	// machine.
+	if want := snap.Uptime - 9*time.Second; user.Uptime != want {
+		t.Errorf("pid 1234 Uptime = %s, want %s", user.Uptime, want)
 	}
 	if want := 4 * time.Second; user.CPUTime != want {
 		t.Errorf("pid 1234 CPUTime = %s, want %s", user.CPUTime, want)
