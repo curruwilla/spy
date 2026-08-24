@@ -36,6 +36,56 @@ func press(t *testing.T, m Model, keys ...string) Model {
 	return m
 }
 
+// TestKShowsTheKernelThreads covers the one key that puts rows back on the
+// screen: the monitor starts without the kernel's threads, K asks for them
+// and asks again to be rid of them.
+func TestKShowsTheKernelThreads(t *testing.T) {
+	m := testModel(t, withKernel())
+	if !m.filter.hideKernel {
+		t.Fatal("the monitor should start with the kernel threads hidden")
+	}
+	if len(m.rows) != 4 {
+		t.Errorf("table starts with %d rows, want the 4 that are not the kernel's", len(m.rows))
+	}
+
+	m = press(t, m, "K")
+	if m.filter.hideKernel {
+		t.Error("K should show the kernel threads")
+	}
+	if len(m.rows) != 6 {
+		t.Errorf("table has %d rows after K, want all 6", len(m.rows))
+	}
+	// A table showing more than it was asked for has to say so.
+	if footer := m.viewFooter(); !strings.Contains(footer, "kernel") {
+		t.Errorf("footer = %q, want it to say the kernel threads are showing", footer)
+	}
+
+	m = press(t, m, "K")
+	if !m.filter.hideKernel || len(m.rows) != 4 {
+		t.Errorf("K again should hide them: hidden = %v, %d rows", m.filter.hideKernel, len(m.rows))
+	}
+	if footer := m.viewFooter(); strings.Contains(footer, "· kernel") {
+		t.Errorf("footer = %q, want nothing about the kernel threads once they are hidden", footer)
+	}
+}
+
+// TestTitleCountsWhatIsOnTheScreen covers the procs figure in the title: it
+// is the rows the table is drawing, not every pid on the machine, so the
+// kernel threads leave the count along with the rows.
+func TestTitleCountsWhatIsOnTheScreen(t *testing.T) {
+	m := testModel(t, withKernel())
+	m.width = 160
+	m.snap.Load.Total, m.snap.Load.Running = 1234, 3
+
+	if title := m.viewTitle(); !strings.Contains(title, "4 procs") {
+		t.Errorf("title = %q, want the four rows on the screen", title)
+	}
+	m = press(t, m, "K")
+	if title := m.viewTitle(); !strings.Contains(title, "6 procs") {
+		t.Errorf("title = %q, want all six once the kernel threads are showing", title)
+	}
+}
+
 func TestNewRejectsUnknownSortColumn(t *testing.T) {
 	if _, err := New(nil, Options{Sort: "disk"}); err == nil {
 		t.Error("want an error for an unknown sort column")

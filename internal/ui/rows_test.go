@@ -22,6 +22,46 @@ func sample() []proc.Process {
 	}
 }
 
+// withKernel is a snapshot with the kernel's own threads in it: kthreadd
+// and one of the workers it spawns, alongside the processes someone
+// started.
+func withKernel() []proc.Process {
+	return append(sample(),
+		proc.Process{PID: 2, PPID: 0, User: "root", Command: "kthreadd", Kernel: true},
+		proc.Process{PID: 30, PPID: 2, User: "root", Command: "kworker/3:1", Kernel: true},
+	)
+}
+
+// TestKernelThreadsAreHiddenUntilAsked covers the rows the table leaves out
+// by default: the kernel's bookkeeping, which holds no memory and is not
+// work anyone started. Tree mode drops them too, kthreadd and the workers
+// under it together.
+func TestKernelThreadsAreHiddenUntilAsked(t *testing.T) {
+	for _, tree := range []bool{false, true} {
+		name := "flat"
+		if tree {
+			name = "tree"
+		}
+		t.Run(name, func(t *testing.T) {
+			hidden := pids(buildRows(withKernel(), sortPID, false, filter{hideKernel: true}, tree))
+			if len(hidden) != 4 {
+				t.Errorf("table has %d rows, want the 4 that are not the kernel's: %v", len(hidden), hidden)
+			}
+			for _, pid := range hidden {
+				if pid == 2 || pid == 30 {
+					t.Errorf("pid %d is a kernel thread and should be hidden: %v", pid, hidden)
+				}
+			}
+
+			shown := pids(buildRows(withKernel(), sortPID, false, filter{}, tree))
+			if len(shown) != 6 {
+				t.Errorf("table has %d rows with the kernel threads asked for, want all 6: %v",
+					len(shown), shown)
+			}
+		})
+	}
+}
+
 func pids(rows []row) []int {
 	out := make([]int, len(rows))
 	for i, r := range rows {

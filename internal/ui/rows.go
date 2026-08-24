@@ -15,20 +15,28 @@ type row struct {
 }
 
 // filter decides which processes reach the table: a text match against the
-// command, the owner or the pid, plus the numeric floors below which a
-// process is not worth showing. The zero value keeps everything.
+// command, the owner or the pid, the numeric floors below which a process
+// is not worth showing, and whether the kernel's own threads are among
+// them. The zero value keeps everything; the monitor starts with the
+// kernel threads hidden, which is what hideKernel is for.
 type filter struct {
-	text string
-	min  thresholds
+	text       string
+	min        thresholds
+	hideKernel bool
 }
 
 // empty reports whether the filter lets every process through.
 func (f filter) empty() bool {
-	return f.text == "" && f.min == (thresholds{})
+	return f.text == "" && f.min == (thresholds{}) && !f.hideKernel
 }
 
-// matches reports whether a process satisfies both halves of the filter.
+// matches reports whether a process satisfies every part of the filter.
+// The kernel threads go first: they are hidden for being what they are,
+// not for what they are doing, so nothing they hold matters after that.
 func (f filter) matches(p proc.Process) bool {
+	if f.hideKernel && p.Kernel {
+		return false
+	}
 	return f.min.keeps(p) && f.matchesText(p)
 }
 

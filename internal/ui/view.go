@@ -332,20 +332,32 @@ func (m Model) viewTitle() string {
 	// The gap before the clock is what the details have to fit inside.
 	budget := m.inner() - len("spy") - len(titleGap) - lipgloss.Width(clock) - 1
 
-	// What the processor is has a short form and a long one; the rest of
-	// the details have only themselves. Each is written in the first form
-	// the line still has room for, and the ones after a detail that does
-	// not fit at all are dropped with it.
+	// Two of the details have a short form and a long one: what the
+	// processor is, and how much is running on it. Each is written in the
+	// first form the line still has room for, and the ones after a detail
+	// that does not fit at all are dropped with it.
 	cores := []string{fmt.Sprintf("%d cores", len(snap.CPU.Cores))}
 	if snap.CPU.Model != "" {
 		cores = append([]string{fmt.Sprintf("%d × %s", len(snap.CPU.Cores), snap.CPU.Model)}, cores...)
+	}
+
+	// The threads are what the kernel counts and what the run queue is
+	// drawn from, so they belong between the processes holding them and
+	// the few of them on a core right now. A kernel that does not report
+	// them leaves the count at zero, and the line goes without. The
+	// processes are the rows on the screen, not every pid on the machine:
+	// what the table is not showing is not what the title is counting.
+	tasks := []string{fmt.Sprintf("%d procs, %d running", len(m.rows), snap.Load.Running)}
+	if snap.Load.Total > 0 {
+		tasks = append([]string{fmt.Sprintf("%d procs, %d threads, %d running",
+			len(m.rows), snap.Load.Total, snap.Load.Running)}, tasks...)
 	}
 
 	var shown []string
 	for _, forms := range [][]string{
 		{"up " + formatUptime(snap.Uptime)},
 		cores,
-		{fmt.Sprintf("%d procs, %d running", len(snap.Processes), snap.Load.Running)},
+		tasks,
 	} {
 		sep := 0
 		if len(shown) > 0 {
@@ -775,6 +787,9 @@ func (m Model) viewFooter() string {
 	if m.tree {
 		state += " · tree"
 	}
+	if !m.filter.hideKernel {
+		state += " · kernel"
+	}
 	if m.follow != 0 {
 		state += fmt.Sprintf(" · following %d", m.follow)
 	}
@@ -810,6 +825,7 @@ var helpHints = []struct{ key, label string }{
 	{"c/m/p/n", "sort"},
 	{"/", "filter"},
 	{"t", "tree"},
+	{"K", "kernel"},
 	{"i", "info"},
 	{"x", "kill"},
 	{"q", "quit"},

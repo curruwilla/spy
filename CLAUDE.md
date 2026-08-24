@@ -41,8 +41,14 @@ library.
   and has no detail on its right at all, so it is not counted in `gaugeCells`.
 - Errors from a failed refresh are shown in the footer, never fatal: the last good
   snapshot stays on screen.
-- `viewRow` marks how relevant a process is: kernel threads (`proc.Process.Kernel`)
-  are dimmed whole, the reader's own account is colored apart from the others, the
+- Kernel threads (`proc.Process.Kernel`) are hidden: they are two in five of the pids
+  on a busy machine, hold no memory and are nobody's work. `filter.hideKernel` is what
+  drops them, `K` puts them back, and the footer says so while they are up. The zero
+  `filter` still keeps everything — the default is set in `New`.
+- The title counts the rows on the screen, not the pids on the machine, so what the
+  table is not showing is not in the count either.
+- `viewRow` marks how relevant a process is: a kernel thread, when one is on screen,
+  is dimmed whole, the reader's own account is colored apart from the others, the
   state letter carries the anomalies and an `active` process gets a bold command.
 - The title, the column titles and the footer are filled bars. Every style used
   inside one carries its background (`styleBar*`, `styleColumns*`) and the line is

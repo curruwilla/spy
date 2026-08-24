@@ -120,9 +120,12 @@ func New(c *proc.Collector, opts Options) (Model, error) {
 		me:        currentUser(),
 		sort:      key,
 		tree:      opts.Tree,
-		filter:    filter{text: opts.Filter, min: min},
-		width:     80,
-		height:    24,
+		// The kernel's own threads are bookkeeping, not work anyone
+		// started: two in five of the rows on a busy machine, none of
+		// them holding memory. They are hidden until K asks for them.
+		filter: filter{text: opts.Filter, min: min, hideKernel: true},
+		width:  80,
+		height: 24,
 	}, nil
 }
 
@@ -267,6 +270,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "t":
 		m.tree = !m.tree
+		m.rebuild()
+	case "K":
+		m.filter.hideKernel = !m.filter.hideKernel
 		m.rebuild()
 	case " ":
 		// Holding the screen still is the only way to read a busy table:

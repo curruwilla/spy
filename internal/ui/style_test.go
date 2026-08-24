@@ -345,6 +345,53 @@ func TestHeaderWithoutASensorSaysNothing(t *testing.T) {
 	}
 }
 
+// TestTitleCountsTheThreads covers what the title says is running: the
+// processes, the threads the kernel counts inside them, and the few of
+// those on a core right now. The threads are the first of the three to go
+// on a line with no room for all of them.
+func TestTitleCountsTheThreads(t *testing.T) {
+	for _, c := range []struct {
+		width int
+		want  string
+	}{
+		{160, "4 procs, 1234 threads, 3 running"},
+		{120, "4 procs, 1234 threads, 3 running"},
+		{80, "4 procs, 3 running"},
+	} {
+		t.Run(fmt.Sprint(c.width), func(t *testing.T) {
+			m := loaded(t)
+			m.width = c.width
+			m.snap.Load.Running, m.snap.Load.Total = 3, 1234
+			if title := m.viewTitle(); !strings.Contains(title, c.want) {
+				t.Errorf("title = %q, want it to hold %q", title, c.want)
+			}
+		})
+	}
+
+	// Narrower than either form, and the counts go rather than wrap.
+	m := loaded(t)
+	m.width = 64
+	m.snap.Load.Running, m.snap.Load.Total = 3, 1234
+	if title := m.viewTitle(); strings.Contains(title, "procs") {
+		t.Errorf("title = %q, want the counts dropped at 64 columns", title)
+	}
+}
+
+// TestTitleWithoutAThreadCount covers the kernel that does not report one:
+// the title says what it knows and leaves the rest out.
+func TestTitleWithoutAThreadCount(t *testing.T) {
+	m := loaded(t)
+	m.width = 160
+	m.snap.Load.Running, m.snap.Load.Total = 3, 0
+	title := m.viewTitle()
+	if !strings.Contains(title, "4 procs, 3 running") {
+		t.Errorf("title = %q, want the counts it does have", title)
+	}
+	if strings.Contains(title, "threads") {
+		t.Errorf("title = %q, want no thread count at all", title)
+	}
+}
+
 // TestTitleNamesTheProcessorWhileItFits covers the one detail with two
 // forms: the model is worth the room when there is room, and the count of
 // cores is what is left when there is not.
