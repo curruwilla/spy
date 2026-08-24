@@ -910,8 +910,8 @@ func TestHeaderSeparatesItsGroups(t *testing.T) {
 		height int
 		blanks []int // header lines expected to be empty
 	}{
-		{"tall", 30, []int{0, 2, 6, 9}},
-		{"compact", compactHeight - 1, []int{3}},
+		{"tall", 30, []int{0, 2, 5, 8}},
+		{"compact", compactHeight - 1, []int{2}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -939,7 +939,7 @@ func TestHeaderSeparatesItsGroups(t *testing.T) {
 			separated := false
 			for _, i := range blanks {
 				separated = separated || i > 0 && i+1 < len(lines) &&
-					strings.Contains(lines[i-1], "Cpu") && strings.Contains(lines[i+1], "Mem")
+					strings.Contains(lines[i-1], "cpu") && strings.Contains(lines[i+1], "mem")
 			}
 			if !separated {
 				t.Errorf("nothing separates the cpu block from the memory one:\n%s", strings.Join(lines, "\n"))

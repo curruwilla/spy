@@ -15,8 +15,8 @@ import (
 // title, the CPU block and the memory block — with blank lines, which a
 // terminal too short to spare them gives back to the table.
 const (
-	headerLines        = 11 // top margin, cpu and memory blocks, spacers, column titles
-	headerLinesCompact = 7  // the same without the margin, the spacers and the trend line
+	headerLines        = 10 // top margin, cpu and memory blocks, spacers, column titles
+	headerLinesCompact = 6  // the same without the margin, the spacers and the trend line
 	compactHeight      = 22 // terminal height below which the header sheds them
 	footerHeight       = 1
 )
@@ -195,23 +195,17 @@ func (m Model) viewHeader() []string {
 	if !m.compact() {
 		lines = append(lines, "")
 	}
-	// The three processor lines close in on the present: the trend is the
-	// total over time, the cores are what that total is made of right now,
-	// and the bar under them is the total itself. The trend goes first
-	// because it is the one a short terminal gives up, along with the
-	// network figures that ride on its right — it is also the only line
-	// that says something the two below it already say, only earlier.
+	// The trend comes before the bar it is a history of, and it is the
+	// first header line a short terminal gives up, along with the network
+	// figures that ride on its right, because it is the only line that
+	// says something the one below it already says, only earlier.
 	if !m.compact() {
-		// The trend line keeps a column per reading whatever the room: it
-		// grows a reading at a time, and bars that widened while it filled
-		// would make a quiet machine look like a busy one shrinking.
-		lines = append(lines, m.headerRow("hist", sparkBody(tailValues(m.history, cells), cells, 1), cells, net))
+		lines = append(lines, m.headerRow("hist", sparkBody(tailValues(m.history, cells), cells), cells, net))
 	}
 	lines = append(lines,
-		m.coreRow(cpu.Cores, cells, disk),
 		m.meter("cpu", cpu.Total, bar, cpuInfo, load),
 		"",
-		m.meter("mem", mem.UsedPercent(), bar, memInfo, ""),
+		m.meter("mem", mem.UsedPercent(), bar, memInfo, disk),
 		m.meter("swp", mem.SwapPercent(), bar, swapInfo, ""),
 	)
 	if !m.compact() {
@@ -248,21 +242,11 @@ func (m Model) gaugeCells(details ...string) int {
 	return max(1, min(cells, (m.inner()-meterFixed-1)/2))
 }
 
-// coreRow is the header line for the cores: one numbered bar each while
-// the numbers fit on the line, and the plain spark cells once they stop
-// fitting, which is the only form a machine with many cores has room for.
-func (m Model) coreRow(cores []float64, cells int, right string) string {
-	body := coreBars(cores, sparkField(cells))
-	if body == "" {
-		body = sparkBody(cores, cells, sparkCell(len(cores), cells))
-	}
-	return m.headerRow("core", body, cells, right)
-}
-
-// sparkBody is a spark line bracketed and padded out to the field, the
-// shape a header row that is not drawing numbered bars takes.
-func sparkBody(values []float64, cells, cell int) string {
-	return bracket(padStyled(sparkline(values, cells, cell), cells))
+// sparkBody is a spark line bracketed and padded out to the whole field,
+// so that a trend with less history than room does not drag the detail on
+// its right along with it.
+func sparkBody(values []float64, cells int) string {
+	return bracket(padStyled(sparkline(values, cells), cells))
 }
 
 // sparkField is how many columns a spark line takes up in full, its
@@ -308,7 +292,7 @@ func padStyled(s string, w int) string {
 // when it does not fit is the oldest of it, not the newest.
 func tailValues(values []float64, width int) []float64 {
 	n := len(values)
-	for n > 0 && sparkWidth(n, 1) > width {
+	for n > 0 && sparkWidth(n) > width {
 		n--
 	}
 	return values[len(values)-n:]
