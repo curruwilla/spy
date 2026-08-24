@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -108,10 +109,26 @@ const (
 // gauge draws a bracketed bar of cells, the filled ones colored by load and
 // the rest dimmed. The cells are spaced apart so the bar reads as a scale
 // instead of a solid block; cells is how many of them there are, so the
-// result is gaugeWidth(cells) columns wide.
-func gauge(pct float64, cells int) string {
+// result is gaugeWidth(cells) columns wide whatever else is on it.
+//
+// inside is the reading the bar is a picture of — the bytes behind the
+// percentage — written along the right end of the bar, where the empty
+// cells are and there is nothing to cover. The cells make do with the room
+// it leaves, down to the shortest scale still worth reading; a bar narrower
+// than that keeps its cells and goes without the reading.
+func gauge(pct float64, cells int, inside string) string {
 	if cells <= 0 {
 		return ""
+	}
+	room := gaugeWidth(cells) - len(gaugeOpen) - len(gaugeClose)
+	if text := lipgloss.Width(inside); text > 0 {
+		// The scale keeps a gap the width of the ones around the bar, so
+		// that the last cell and the first digit do not read as one thing.
+		if n := (room - text - len(meterGap) + 1) / 2; n >= minGaugeCells {
+			cells = n
+		} else {
+			inside = ""
+		}
 	}
 	filled := clamp(int(pct/100*float64(cells)), 0, cells)
 	parts := make([]string, 0, 2)
@@ -121,7 +138,11 @@ func gauge(pct float64, cells int) string {
 	if filled < cells {
 		parts = append(parts, styleDim.Render(spaced(gaugeEmpty, cells-filled)))
 	}
-	return bracket(strings.Join(parts, " "))
+	body := strings.Join(parts, " ")
+	if inside != "" {
+		body += strings.Repeat(" ", room-gaugeWidth(cells)+2-lipgloss.Width(inside)) + inside
+	}
+	return bracket(body)
 }
 
 // gaugeWidth is how many columns a bar of n cells takes: a gap between
@@ -146,44 +167,122 @@ func spaced(cell string, n int) string {
 // sparkline levels, from nearly idle to saturated.
 var levels = []rune("▁▂▃▄▅▆▇█")
 
-// sparkGroup is how many cores share a group. A gap every few cells keeps a
+// sparkGroup is how many cells share a group. A gap every few cells keeps a
 // long row countable instead of a solid block.
 const sparkGroup = 4
 
-// sparkline draws one cell per value, its height and color both showing the
-// load. It is how every core fits on a single line, and it never draws more
-// than width cells: a header line that wraps costs the table a row. A
-// machine with too many cores for the gaps loses them first, and only then
-// the cores on the right, replaced by an ellipsis.
-// sparkWidth is how many columns n cells take up once the gaps between the
-// groups are in.
-func sparkWidth(n int) int {
+// maxSparkCell is the widest a single value is drawn. A row of a dozen
+// cores has columns to spare on a wide screen, and spending them on the
+// bars beats leaving them blank — but past a handful of columns each the
+// row stops reading as a row of bars.
+const maxSparkCell = 6
+
+// sparkWidth is how many columns n values take up when each is cell columns
+// wide, once the gaps between the groups are in — and, for bars wider than
+// a column, the space that keeps two of them from merging into one block.
+func sparkWidth(n, cell int) int {
 	if n <= 0 {
 		return 0
 	}
-	return n + (n-1)/sparkGroup
+	w := n*cell + (n-1)/sparkGroup
+	if cell > 1 {
+		w += n - 1
+	}
+	return w
 }
 
-func sparkline(values []float64, width int) string {
-	if width <= 0 || len(values) == 0 {
+// sparkCell is how many columns each value gets: as many as the row can
+// give every one of them equally, so that a machine with few cores fills
+// its line instead of huddling on the left of it. One column each is the
+// fallback, and the only width a row too crowded to separate its bars has.
+func sparkCell(n, width int) int {
+	for cell := maxSparkCell; cell > 1; cell-- {
+		if sparkWidth(n, cell) <= width {
+			return cell
+		}
+	}
+	return 1
+}
+
+// coreBarsWidth is how many columns n numbered bars take up, each of them
+// cell columns wide inside its brackets, with a space between the cores.
+func coreBarsWidth(n, cell int) int {
+	if n <= 0 {
+		return 0
+	}
+	w := n*(cell+len(gaugeOpen)+len(gaugeClose)) + (n - 1)
+	for i := range n {
+		w += len(strconv.Itoa(i))
+	}
+	return w
+}
+
+// coreCell is how wide each core's bar is drawn in the numbered form, and
+// whether that form fits at all: zero means the labels cost more columns
+// than the line has, and the row falls back to plain spark cells.
+func coreCell(n, width int) int {
+	for cell := maxSparkCell; cell >= 1; cell-- {
+		if coreBarsWidth(n, cell) <= width {
+			return cell
+		}
+	}
+	return 0
+}
+
+// coreBars draws every core as a numbered bar of its own, so that a core
+// under load can be named — the number is the one /proc, taskset and the
+// process table count with. It is the clearest the row gets, and the only
+// form that needs no counting along a group of cells, but it is also the
+// widest: past a dozen or so cores the numbers cost more than the bars they
+// label, and coreBars returns nothing rather than a line that wraps.
+func coreBars(values []float64, width int) string {
+	cell := coreCell(len(values), width)
+	if cell == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for n, v := range values {
+		if n > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(styleDim.Render(strconv.Itoa(n)))
+		i := clamp(int(v/100*float64(len(levels))), 0, len(levels)-1)
+		b.WriteString(bracket(heat(v).Render(strings.Repeat(string(levels[i]), cell))))
+	}
+	return b.String()
+}
+
+// sparkline draws each value as a bar cell columns wide, its height and
+// color both showing the load. It is how every core fits on a single line,
+// and it never draws more than width columns: a header line that wraps
+// costs the table a row. A machine with too many cores for the gaps loses
+// them first, and only then the cores on the right, replaced by an
+// ellipsis.
+func sparkline(values []float64, width, cell int) string {
+	if width <= 0 || len(values) == 0 || cell <= 0 {
 		return ""
 	}
 	group := sparkGroup
-	if len(values)+(len(values)-1)/group > width {
+	if sparkWidth(len(values), cell) > width {
 		group = 0
 	}
-	trimmed := len(values) > width
+	trimmed := len(values)*cell > width
 	if trimmed {
-		values = values[:width-1]
+		values = values[:(width-1)/cell]
 	}
 
 	var b strings.Builder
 	for n, v := range values {
-		if group > 0 && n > 0 && n%group == 0 {
-			b.WriteByte(' ')
+		if n > 0 {
+			if group > 0 && n%group == 0 {
+				b.WriteByte(' ')
+			}
+			if cell > 1 {
+				b.WriteByte(' ')
+			}
 		}
 		i := clamp(int(v/100*float64(len(levels))), 0, len(levels)-1)
-		b.WriteString(heat(v).Render(string(levels[i])))
+		b.WriteString(heat(v).Render(strings.Repeat(string(levels[i]), cell)))
 	}
 	if trimmed {
 		b.WriteString(styleDim.Render("…"))

@@ -25,7 +25,7 @@ func TestGaugeSpacesItsCells(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := gauge(c.pct, c.cells)
+			got := gauge(c.pct, c.cells, "")
 			if got != c.want {
 				t.Errorf("gauge(%v, %d) = %q, want %q", c.pct, c.cells, got, c.want)
 			}
@@ -36,25 +36,72 @@ func TestGaugeSpacesItsCells(t *testing.T) {
 	}
 }
 
+// TestGaugeWritesTheReadingInside covers the bytes a bar carries along its
+// right end: the cells give up the room for them, the bar stays the length
+// every other bar is, and a bar with no room to spare keeps its scale and
+// drops the reading instead.
+func TestGaugeWritesTheReadingInside(t *testing.T) {
+	cases := []struct {
+		name   string
+		cells  int
+		inside string
+		want   string
+	}{
+		{
+			name: "the cells make room", cells: 12, inside: "10.2G/31G",
+			want: "[" + wantCells(3, 3) + "   10.2G/31G]",
+		},
+		{
+			name: "down to the shortest scale worth reading", cells: 10, inside: "10.2G/31G",
+			want: "[" + wantCells(2, 2) + "   10.2G/31G]",
+		},
+		{
+			name: "no room for it at all", cells: 9, inside: "10.2G/31G",
+			want: wantGauge(4, 5),
+		},
+		{
+			name: "nothing to write", cells: 6, inside: "",
+			want: wantGauge(3, 3),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := gauge(50, c.cells, c.inside)
+			if got != c.want {
+				t.Errorf("gauge(50, %d, %q) = %q, want %q", c.cells, c.inside, got, c.want)
+			}
+			if w := lipgloss.Width(got); w != gaugeWidth(c.cells) {
+				t.Errorf("gauge is %d columns wide, want gaugeWidth = %d, the width every other bar has",
+					w, gaugeWidth(c.cells))
+			}
+		})
+	}
+}
+
 func TestSparklineFitsTheWidth(t *testing.T) {
 	cases := []struct {
 		name   string
 		cores  int
 		width  int
+		cell   int
 		want   string
 		reason string
 	}{
-		{name: "grouped in fours", cores: 8, width: 40, want: "▅▅▅▅ ▅▅▅▅"},
-		{name: "gaps dropped to fit", cores: 8, width: 8, want: "▅▅▅▅▅▅▅▅"},
-		{name: "trimmed when even that is too wide", cores: 10, width: 6, want: "▅▅▅▅▅…"},
-		{name: "no room at all", cores: 8, width: 0, want: ""},
-		{name: "nothing to draw", cores: 0, width: 20, want: ""},
+		{name: "grouped in fours", cores: 8, width: 40, cell: 1, want: "▅▅▅▅ ▅▅▅▅"},
+		{name: "gaps dropped to fit", cores: 8, width: 8, cell: 1, want: "▅▅▅▅▅▅▅▅"},
+		{name: "trimmed when even that is too wide", cores: 10, width: 6, cell: 1, want: "▅▅▅▅▅…"},
+		{name: "no room at all", cores: 8, width: 0, cell: 1, want: ""},
+		{name: "nothing to draw", cores: 0, width: 20, cell: 1, want: ""},
+		{name: "wide bars are spaced apart", cores: 5, width: 40, cell: 3,
+			want: "▅▅▅ ▅▅▅ ▅▅▅ ▅▅▅  ▅▅▅"},
+		{name: "no bar at all", cores: 8, width: 40, cell: 0, want: ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := sparkline(halfLoaded(c.cores), c.width)
+			got := sparkline(halfLoaded(c.cores), c.width, c.cell)
 			if got != c.want {
-				t.Errorf("sparkline(%d cores, width %d) = %q, want %q", c.cores, c.width, got, c.want)
+				t.Errorf("sparkline(%d cores, width %d, cell %d) = %q, want %q",
+					c.cores, c.width, c.cell, got, c.want)
 			}
 			if w := lipgloss.Width(got); w > c.width {
 				t.Errorf("sparkline is %d cells wide, want at most %d", w, c.width)
@@ -106,7 +153,7 @@ func TestGaugesGrowWithTheScreenAndKeepTheirDetail(t *testing.T) {
 
 		var cpu string
 		for _, line := range m.viewHeader() {
-			if strings.HasPrefix(line, "CPU") {
+			if strings.HasPrefix(line, "Cpu") {
 				cpu = line
 			}
 		}
@@ -156,7 +203,7 @@ func TestHeaderShowsTheTrafficAndTheTemperature(t *testing.T) {
 	for _, c := range []struct{ label, want string }{
 		{"core", "disk read 12M/s  write 4.0M/s"},
 		{"hist", "net rx 1.0M/s  tx 512K/s"},
-		{"CPU", "temp 52°C"},
+		{"Cpu", "temp 52°C"},
 	} {
 		if line := headerLine(t, m, c.label); !strings.Contains(line, c.want) {
 			t.Errorf("the %s line is missing %q: %q", c.label, c.want, line)
@@ -173,22 +220,118 @@ func TestHeaderDetailsShareAColumn(t *testing.T) {
 			m := loaded(t)
 			m.width = width
 
+			// The memory lines have nothing out there: their reading is
+			// written inside the bar, and they end at the percentage.
 			at := map[string]int{
 				"core": detailColumn(headerLine(t, m, "core"), "disk"),
 				"hist": detailColumn(headerLine(t, m, "hist"), "net"),
-				"CPU":  detailColumn(headerLine(t, m, "CPU"), "load"),
-				"MEM":  detailColumn(headerLine(t, m, "MEM"), "used"),
+				"Cpu":  detailColumn(headerLine(t, m, "Cpu"), "load"),
 			}
 			for label, column := range at {
 				if column < 0 {
 					t.Fatalf("the %s line lost its detail at %d columns", label, width)
 				}
-				if column != at["CPU"] {
+				if column != at["Cpu"] {
 					t.Errorf("the %s detail starts at column %d, want %d like the rest:\n%s",
-						label, column, at["CPU"], strings.Join(m.viewHeader(), "\n"))
+						label, column, at["Cpu"], strings.Join(m.viewHeader(), "\n"))
 				}
 			}
 		})
+	}
+}
+
+// TestBarsCarryTheirReading covers what the bars say beyond how full they
+// are: the bytes behind the percentage, written inside the bar itself, and
+// the cores the processor's load adds up to.
+func TestBarsCarryTheirReading(t *testing.T) {
+	m := loaded(t)
+	m.width = 160
+	m.snap.Memory = proc.Memory{
+		Total: 32 << 30, Available: 22 << 30,
+		SwapTotal: 8 << 30, SwapFree: 8 << 30,
+	}
+
+	for _, c := range []struct{ label, want string }{
+		{"Cpu", "3.4/8 cores"},
+		{"Mem", "10.0G/32.0G"},
+		{"Swp", "0B/8.0G"},
+	} {
+		if line := headerLine(t, m, c.label); !strings.Contains(line, c.want) {
+			t.Errorf("the %s bar is missing its reading %q: %q", c.label, c.want, line)
+		}
+	}
+
+	// A machine with no swap has no total to count against, so the bar says
+	// so instead of drawing a ratio of zeroes.
+	m.snap.Memory.SwapTotal, m.snap.Memory.SwapFree = 0, 0
+	if line := headerLine(t, m, "Swp"); !strings.Contains(line, "swap disabled") {
+		t.Errorf("the swap bar should say it is disabled: %q", line)
+	}
+}
+
+// TestNarrowBarsKeepTheirScale covers the screen with no room for both: the
+// reading goes rather than the cells, because a bar too short to read is
+// worse than one with nothing written on it.
+func TestNarrowBarsKeepTheirScale(t *testing.T) {
+	for _, width := range []int{80, 60, 40, 30} {
+		m := loaded(t)
+		m.width = width
+
+		line := headerLine(t, m, "Mem")
+		if w := lipgloss.Width(line); w > m.inner() {
+			t.Errorf("at %d columns the mem line is %d wide, want at most %d: %q",
+				width, w, m.inner(), line)
+		}
+		if !strings.Contains(line, gaugeOpen) || !strings.Contains(line, gaugeClose) {
+			t.Errorf("at %d columns the mem line lost its bar: %q", width, line)
+		}
+	}
+}
+
+// TestBarsEndWhereTheSparkRowsDo covers the shape the header keeps once the
+// percentages are gone: a bar is exactly as long as a spark line, so the
+// five rows end together and the memory ones, which have no detail at all,
+// stop at the same column the others hand over to theirs.
+func TestBarsEndWhereTheSparkRowsDo(t *testing.T) {
+	for _, width := range []int{160, 120, 100, 90} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := loaded(t)
+			m.width = width
+
+			field := lipgloss.Width(headerLine(t, m, "Mem"))
+			for _, label := range []string{"Mem", "Swp"} {
+				if got := lipgloss.Width(headerLine(t, m, label)); got != field {
+					t.Errorf("the %s line is %d columns wide, want %d like the other bars",
+						label, got, field)
+				}
+			}
+			for _, c := range []struct{ label, detail string }{
+				{"hist", "net"},
+				{"core", "disk"},
+				{"Cpu", "load"},
+			} {
+				column := detailColumn(headerLine(t, m, c.label), c.detail)
+				if column < 0 {
+					t.Fatalf("the %s line lost its detail at %d columns", c.label, width)
+				}
+				if got := column - len(detailGap); got != field {
+					t.Errorf("the %s row is %d columns before its detail, want %d like the bars:\n%s",
+						c.label, got, field, strings.Join(m.viewHeader(), "\n"))
+				}
+			}
+		})
+	}
+}
+
+// TestMetersDropThePercentage covers what the bars no longer say in words:
+// how full one is, is what it is drawn for.
+func TestMetersDropThePercentage(t *testing.T) {
+	m := loaded(t)
+	m.width = 160
+	for _, label := range []string{"Cpu", "Mem", "Swp"} {
+		if line := headerLine(t, m, label); strings.Contains(line, "%") {
+			t.Errorf("the %s line still spells out a percentage: %q", label, line)
+		}
 	}
 }
 
@@ -208,7 +351,7 @@ func detailColumn(line, label string) int {
 func TestHeaderWithoutASensorSaysNothing(t *testing.T) {
 	m := loaded(t)
 	m.snap.CPU.Temp = 0
-	if line := headerLine(t, m, "CPU"); strings.Contains(line, "temp") {
+	if line := headerLine(t, m, "Cpu"); strings.Contains(line, "temp") {
 		t.Errorf("cpu line = %q, want no temperature at all", line)
 	}
 }
@@ -274,7 +417,7 @@ func TestTailValuesKeepsTheNewest(t *testing.T) {
 			if fmt.Sprint(got) != fmt.Sprint(c.want) {
 				t.Errorf("tailValues(%d values, %d) = %v, want %v", len(c.values), c.width, got, c.want)
 			}
-			if w := lipgloss.Width(sparkline(got, c.width)); w > c.width {
+			if w := lipgloss.Width(sparkline(got, c.width, 1)); w > c.width {
 				t.Errorf("the line it draws is %d columns wide, want at most %d", w, c.width)
 			}
 		})
@@ -284,13 +427,120 @@ func TestTailValuesKeepsTheNewest(t *testing.T) {
 // TestSparkWidthCountsTheGaps keeps the two halves of the spark line in
 // step: what tailValues measures with and what sparkline then draws.
 func TestSparkWidthCountsTheGaps(t *testing.T) {
-	for n := 1; n <= 40; n++ {
-		if got, want := sparkWidth(n), lipgloss.Width(sparkline(halfLoaded(n), sparkWidth(n))); got != want {
-			t.Errorf("sparkWidth(%d) = %d, but the line it draws is %d wide", n, got, want)
+	for cell := 1; cell <= maxSparkCell; cell++ {
+		for n := 1; n <= 40; n++ {
+			width := sparkWidth(n, cell)
+			if got := lipgloss.Width(sparkline(halfLoaded(n), width, cell)); got != width {
+				t.Errorf("sparkWidth(%d, %d) = %d, but the line it draws is %d wide",
+					n, cell, width, got)
+			}
+		}
+		if got := sparkWidth(0, cell); got != 0 {
+			t.Errorf("sparkWidth(0, %d) = %d, want 0", cell, got)
 		}
 	}
-	if got := sparkWidth(0); got != 0 {
-		t.Errorf("sparkWidth(0) = %d, want 0", got)
+}
+
+// TestCoreBarsNumberTheCores covers the clearest form of the core row: one
+// numbered bar per core, so that a busy core can be named rather than
+// counted along a row of cells.
+func TestCoreBarsNumberTheCores(t *testing.T) {
+	got := coreBars(halfLoaded(4), 40)
+	if want := "0[▅▅▅▅▅▅] 1[▅▅▅▅▅▅] 2[▅▅▅▅▅▅] 3[▅▅▅▅▅▅]"; got != want {
+		t.Errorf("coreBars(4 cores, 40) = %q, want %q", got, want)
+	}
+	if w := lipgloss.Width(got); w > 40 {
+		t.Errorf("the bars are %d columns wide, want at most 40", w)
+	}
+}
+
+// TestCoreBarsGiveUpWhenTheNumbersDoNotFit covers the machine the numbered
+// form has no room for: it draws nothing, and coreRow falls back to the
+// plain spark cells instead of wrapping the line.
+func TestCoreBarsGiveUpWhenTheNumbersDoNotFit(t *testing.T) {
+	for _, c := range []struct{ cores, width int }{
+		{cores: 64, width: 71},
+		{cores: 12, width: 10},
+		{cores: 4, width: 0},
+	} {
+		if got := coreBars(halfLoaded(c.cores), c.width); got != "" {
+			t.Errorf("coreBars(%d cores, %d) = %q, want nothing",
+				c.cores, c.width, got)
+		}
+	}
+	if got := coreBars(nil, 71); got != "" {
+		t.Errorf("coreBars(no cores) = %q, want nothing", got)
+	}
+}
+
+// TestCoreBarsWidthCountsTheLabels keeps the two halves of the core row in
+// step: what coreCell measures with and what coreBars then draws. The
+// numbers are what makes it awkward — the row grows a column at every
+// power of ten.
+func TestCoreBarsWidthCountsTheLabels(t *testing.T) {
+	for cell := 1; cell <= maxSparkCell; cell++ {
+		for n := 1; n <= 13; n++ {
+			width := coreBarsWidth(n, cell)
+			if got := lipgloss.Width(coreBars(halfLoaded(n), width)); got != width {
+				t.Errorf("coreBarsWidth(%d, %d) = %d, but the bars it draws are %d wide",
+					n, cell, width, got)
+			}
+		}
+		if got := coreBarsWidth(0, cell); got != 0 {
+			t.Errorf("coreBarsWidth(0, %d) = %d, want 0", cell, got)
+		}
+	}
+}
+
+// TestCoreRowFallsBackToTheSparkCells covers the switch between the two
+// forms of the row: the numbers while they fit, the cells once they do not,
+// and a line that stays inside the screen either way.
+func TestCoreRowFallsBackToTheSparkCells(t *testing.T) {
+	for _, c := range []struct {
+		cores    int
+		numbered bool
+	}{
+		{cores: 4, numbered: true},
+		{cores: 12, numbered: true},
+		{cores: 16, numbered: false},
+		{cores: 128, numbered: false},
+	} {
+		m := loaded(t)
+		m.width = 200
+		m.snap.CPU.Cores = halfLoaded(c.cores)
+
+		line := headerLine(t, m, "core")
+		if numbered := strings.Contains(line, "0["); numbered != c.numbered {
+			t.Errorf("the core row for %d cores is numbered = %v, want %v: %q",
+				c.cores, numbered, c.numbered, line)
+		}
+		if w := lipgloss.Width(line); w > m.inner() {
+			t.Errorf("the core row for %d cores is %d columns wide, want at most %d",
+				c.cores, w, m.inner())
+		}
+	}
+}
+
+// TestSparkCellFillsTheRow covers the width each bar is given: as wide as
+// the row can afford, never wider than the row, and never below the one
+// column a crowded machine leaves.
+func TestSparkCellFillsTheRow(t *testing.T) {
+	for _, cores := range []int{1, 2, 4, 8, 12, 16, 32, 64, 128} {
+		for _, width := range []int{0, 6, 20, 40, 69, 120} {
+			cell := sparkCell(cores, width)
+			if cell < 1 || cell > maxSparkCell {
+				t.Errorf("sparkCell(%d, %d) = %d, want between 1 and %d",
+					cores, width, cell, maxSparkCell)
+			}
+			if cell > 1 && sparkWidth(cores, cell) > width {
+				t.Errorf("sparkCell(%d, %d) = %d, which draws %d columns",
+					cores, width, cell, sparkWidth(cores, cell))
+			}
+			if cell < maxSparkCell && sparkWidth(cores, cell+1) <= width {
+				t.Errorf("sparkCell(%d, %d) = %d, but %d also fits",
+					cores, width, cell, cell+1)
+			}
+		}
 	}
 }
 
@@ -351,6 +601,11 @@ func TestOwnProcessesAreMarked(t *testing.T) {
 // wantGauge spells out the bar the gauge constants draw, so the cells a
 // test expects follow whatever glyphs they are set to.
 func wantGauge(filled, empty int) string {
+	return gaugeOpen + wantCells(filled, empty) + gaugeClose
+}
+
+// wantCells is the scale inside a gauge, without the brackets around it.
+func wantCells(filled, empty int) string {
 	cells := make([]string, 0, filled+empty)
 	for range filled {
 		cells = append(cells, gaugeFilled)
@@ -358,7 +613,7 @@ func wantGauge(filled, empty int) string {
 	for range empty {
 		cells = append(cells, gaugeEmpty)
 	}
-	return gaugeOpen + strings.Join(cells, " ") + gaugeClose
+	return strings.Join(cells, " ")
 }
 
 // halfLoaded is n cores at the same middling usage, so the cells they draw

@@ -159,18 +159,28 @@ func (m Model) viewHeader() []string {
 	if cpu.Temp > 0 {
 		load += detailSep + detail("temp", fmt.Sprintf("%.0f°C", cpu.Temp))
 	}
-	memInfo := detail("used", fmt.Sprintf("%s of %s", formatBytes(mem.Used()), formatBytes(mem.Total)))
-	swapInfo := detail("used", fmt.Sprintf("%s of %s", formatBytes(mem.SwapUsed()), formatBytes(mem.SwapTotal)))
+	// What each bar is a picture of, written inside it: the percentage on
+	// its right says how full it is, and these say how full of what.
+	memInfo := used(mem.Used(), mem.Total)
+	swapInfo := used(mem.SwapUsed(), mem.SwapTotal)
 	if mem.SwapTotal == 0 {
-		swapInfo = detail("used", "swap disabled")
+		swapInfo = "swap disabled"
+	}
+	// The processor has no total to count against but the cores themselves,
+	// so its bar carries how many of them the load adds up to.
+	cpuInfo := ""
+	if n := len(cpu.Cores); n > 0 {
+		cpuInfo = fmt.Sprintf("%.1f/%d cores", cpu.Total/100*float64(n), n)
 	}
 	disk := traffic("disk", "read", "write", snap.Disk)
 	net := traffic("net", "rx", "tx", snap.Net)
 
 	// Every detail on the right of the header starts at the same column,
 	// so the bars are all one length and the spark lines fill what a bar
-	// and its percentage take up together.
-	details := []string{load, memInfo, swapInfo, disk}
+	// and its percentage take up together. The memory lines have no detail
+	// out there any more — it moved inside the bar — so they have no say in
+	// how long the bars are.
+	details := []string{load, disk}
 	if !m.compact() {
 		details = append(details, net)
 	}
@@ -185,27 +195,35 @@ func (m Model) viewHeader() []string {
 	if !m.compact() {
 		lines = append(lines, "")
 	}
-	// The cores come first: they are what the total below them is made of,
-	// and the bar reads as their summary. The trend line under them is that
-	// same total over time, which is the difference between a machine that
-	// is busy and one that has been busy for a while — and it is the first
-	// header line a short terminal gives up, along with the network figures
-	// that ride on its right, because it is the only one that says
-	// something the lines below it already say, only earlier.
-	lines = append(lines, m.sparkRow("core", cpu.Cores, cells, disk))
+	// The three processor lines close in on the present: the trend is the
+	// total over time, the cores are what that total is made of right now,
+	// and the bar under them is the total itself. The trend goes first
+	// because it is the one a short terminal gives up, along with the
+	// network figures that ride on its right — it is also the only line
+	// that says something the two below it already say, only earlier.
 	if !m.compact() {
-		lines = append(lines, m.sparkRow("hist", tailValues(m.history, cells), cells, net))
+		// The trend line keeps a column per reading whatever the room: it
+		// grows a reading at a time, and bars that widened while it filled
+		// would make a quiet machine look like a busy one shrinking.
+		lines = append(lines, m.headerRow("hist", sparkBody(tailValues(m.history, cells), cells, 1), cells, net))
 	}
 	lines = append(lines,
-		m.meter("CPU", cpu.Total, bar, load),
+		m.coreRow(cpu.Cores, cells, disk),
+		m.meter("cpu", cpu.Total, bar, cpuInfo, load),
 		"",
-		m.meter("MEM", mem.UsedPercent(), bar, memInfo),
-		m.meter("SWP", mem.SwapPercent(), bar, swapInfo),
+		m.meter("mem", mem.UsedPercent(), bar, memInfo, ""),
+		m.meter("swp", mem.SwapPercent(), bar, swapInfo, ""),
 	)
 	if !m.compact() {
 		lines = append(lines, "")
 	}
 	return lines
+}
+
+// used is a reading and the total it counts against, the shape the bars
+// carry it in: short enough to sit inside one and still leave a scale.
+func used(part, total uint64) string {
+	return formatBytes(part) + "/" + formatBytes(total)
 }
 
 // traffic is one throughput as the header shows it: both directions, named
@@ -230,25 +248,49 @@ func (m Model) gaugeCells(details ...string) int {
 	return max(1, min(cells, (m.inner()-meterFixed-1)/2))
 }
 
-// sparkRow is a labelled, bracketed line of cells, laid out like a meter so
-// that the two line up, with whatever detail belongs on its right. The
-// cells are padded out even when there are fewer values than that, so the
-// detail does not slide along the line with them.
-func (m Model) sparkRow(label string, values []float64, cells int, right string) string {
+// coreRow is the header line for the cores: one numbered bar each while
+// the numbers fit on the line, and the plain spark cells once they stop
+// fitting, which is the only form a machine with many cores has room for.
+func (m Model) coreRow(cores []float64, cells int, right string) string {
+	body := coreBars(cores, sparkField(cells))
+	if body == "" {
+		body = sparkBody(cores, cells, sparkCell(len(cores), cells))
+	}
+	return m.headerRow("core", body, cells, right)
+}
+
+// sparkBody is a spark line bracketed and padded out to the field, the
+// shape a header row that is not drawing numbered bars takes.
+func sparkBody(values []float64, cells, cell int) string {
+	return bracket(padStyled(sparkline(values, cells, cell), cells))
+}
+
+// sparkField is how many columns a spark line takes up in full, its
+// brackets counted in. It is what every spark row is padded out to, and so
+// what the numbered bars have to fit inside.
+func sparkField(cells int) int {
+	return cells + len(gaugeOpen) + len(gaugeClose)
+}
+
+// headerRow is a labelled header line laid out like a meter so that the
+// two line up, with whatever detail belongs on its right. The body is
+// padded out to the whole field even when it is shorter, so the detail
+// does not slide along the line with it.
+func (m Model) headerRow(label, body string, cells int, right string) string {
 	line := styleLabel.Render(pad(label, meterLabelWidth, false)) + meterGap +
-		bracket(padStyled(sparkline(values, cells), cells))
+		padStyled(body, sparkField(cells))
 	if right == "" || lipgloss.Width(line)+len(detailGap)+lipgloss.Width(right) > m.inner() {
 		return line
 	}
 	return line + detailGap + right
 }
 
-// sparkCells is how many cells a spark line gets for a given bar: as much
-// room as the bar, the gap after it and its percentage take up together,
-// less its own brackets, so that the details on the right of the two kinds
-// of line start at the same column.
+// sparkCells is how many cells a spark line gets for a given bar: exactly
+// the room the bar takes up, less its own brackets, so that the two kinds
+// of line are the same length and the details on their right start at the
+// same column.
 func sparkCells(bar int) int {
-	return gaugeWidth(bar) + len(meterGap) + len("100%") - len(gaugeOpen) - len(gaugeClose)
+	return gaugeWidth(bar) - len(gaugeOpen) - len(gaugeClose)
 }
 
 // padStyled pads content that has already been coloured out to w columns.
@@ -266,14 +308,14 @@ func padStyled(s string, w int) string {
 // when it does not fit is the oldest of it, not the newest.
 func tailValues(values []float64, width int) []float64 {
 	n := len(values)
-	for n > 0 && sparkWidth(n) > width {
+	for n > 0 && sparkWidth(n, 1) > width {
 		n--
 	}
 	return values[len(values)-n:]
 }
 
 // Spacing inside the header. The gauges keep a wide, constant gap on each
-// side so the label, the bar and the numbers read as separate things
+// side so the label, the bar and the detail read as separate things
 // instead of one block of characters.
 const (
 	meterLabelWidth = 4
@@ -284,8 +326,8 @@ const (
 	titleSep        = "   ·   "
 
 	// What a meter line spends on everything but the bar and the detail:
-	// the label, the gaps around the bar, the brackets and the percentage.
-	meterFixed    = meterLabelWidth + 2*len(meterGap) + len(gaugeOpen) + len(gaugeClose) + len("100%")
+	// the label, the gap before the bar and the brackets around it.
+	meterFixed    = meterLabelWidth + len(meterGap) + len(gaugeOpen) + len(gaugeClose)
 	minGaugeCells = 4
 	maxGaugeCells = 32
 )
@@ -346,15 +388,17 @@ func (m Model) viewTitle() string {
 	return m.spread(title, styleBar.Render(clock), styleBar)
 }
 
-// meter is one labelled gauge line: label, bar, percentage, then whatever
-// detail belongs on the right of it.
-func (m Model) meter(label string, pct float64, cells int, right string) string {
+// meter is one labelled gauge line: label, bar with the reading written
+// inside it, then whatever detail belongs on the right of it. How full the
+// bar is says the percentage, and the reading inside it says what of, so
+// there is no number after it to line the spark rows up against.
+func (m Model) meter(label string, pct float64, cells int, inside, right string) string {
 	bar := styleLabel.Render(pad(label, meterLabelWidth, false)) + meterGap +
-		gauge(pct, cells) + meterGap +
-		heat(pct).Render(fmt.Sprintf("%3.0f%%", pct))
+		gauge(pct, cells, inside)
 	// The gauge itself is what the line is for, so a screen with no room
-	// for the detail on its right goes without it instead of wrapping.
-	if lipgloss.Width(bar)+len(detailGap)+lipgloss.Width(right) > m.inner() {
+	// for the detail on its right goes without it instead of wrapping —
+	// and so does a bar that carries its whole reading inside it.
+	if right == "" || lipgloss.Width(bar)+len(detailGap)+lipgloss.Width(right) > m.inner() {
 		return bar
 	}
 	return bar + detailGap + right

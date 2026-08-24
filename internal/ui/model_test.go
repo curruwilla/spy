@@ -939,7 +939,7 @@ func TestHeaderSeparatesItsGroups(t *testing.T) {
 			separated := false
 			for _, i := range blanks {
 				separated = separated || i > 0 && i+1 < len(lines) &&
-					strings.Contains(lines[i-1], "CPU") && strings.Contains(lines[i+1], "MEM")
+					strings.Contains(lines[i-1], "Cpu") && strings.Contains(lines[i+1], "Mem")
 			}
 			if !separated {
 				t.Errorf("nothing separates the cpu block from the memory one:\n%s", strings.Join(lines, "\n"))

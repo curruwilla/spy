@@ -25,8 +25,13 @@ library.
   `compactHeight`, where it drops the top margin, the spacers and the `hist` line.
   Keep `headerLines` and `headerLinesCompact` in sync when adding header lines.
 - Every detail on the right of the header starts at one column: `gaugeCells` sizes the
-  bars from the widest of them, and `sparkCells` gives the spark lines the room a bar
-  and its percentage take up together. Measure with `lipgloss.Width`, never `len`: the
+  bars from the widest of them, and `sparkCells` gives the spark lines exactly the room
+  a bar takes up. No meter spells its percentage out — how full the bar is says it —
+  so a bar and a spark line are the same length. The `core` line spends that room on the
+  clearest form that fits: `coreBars` numbers every core while the labels fit, and
+  past a dozen or so cores the row falls back to `sparkline`, with `sparkCell`
+  splitting the room between the cells. The `hist` line keeps one column per reading,
+  because it grows a reading at a time. Measure with `lipgloss.Width`, never `len`: the
   glyphs and the separators are multi-byte.
 - The table is `columns`, one descriptor per column. `visibleColumns` drops the disk
   pair on a terminal too narrow for them, so nothing may assume a cell's position —
@@ -34,6 +39,10 @@ library.
 - Everything is laid out in `inner()`, the terminal less a `gutter` on each side,
   and `View` indents the finished lines into it. Use `m.inner()`, never `m.width`,
   when measuring a line.
+- A bar carries the reading behind its percentage inside it, along the right end
+  where the empty cells are: `gauge` takes the text, gives the scale what is left and
+  drops the text on a bar too short to keep both. `Mem` and `Swp` say it there and
+  have no detail on their right at all, so they are not counted in `gaugeCells`.
 - Errors from a failed refresh are shown in the footer, never fatal: the last good
   snapshot stays on screen.
 - `viewRow` marks how relevant a process is: kernel threads (`proc.Process.Kernel`)
