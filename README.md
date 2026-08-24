@@ -18,7 +18,7 @@ Linux only — everything is read straight from `/proc`.
 ### Prebuilt binary
 
 ```sh
-VERSION=0.1.1                               # github.com/curruwilla/spy/releases
+VERSION=0.1.2                               # github.com/curruwilla/spy/releases
 ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 curl -fsSLO "https://github.com/curruwilla/spy/releases/download/v${VERSION}/spy_${VERSION}_linux_${ARCH}.tar.gz"
 tar -xzf "spy_${VERSION}_linux_${ARCH}.tar.gz" spy
