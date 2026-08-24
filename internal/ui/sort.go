@@ -17,10 +17,11 @@ const (
 	sortPID
 	sortName
 	sortTime
+	sortIO
 )
 
 // sortKeys lists every column in the order the tab key cycles them.
-var sortKeys = []sortKey{sortCPU, sortMem, sortPID, sortName, sortTime}
+var sortKeys = []sortKey{sortCPU, sortMem, sortPID, sortName, sortTime, sortIO}
 
 func (k sortKey) String() string {
 	switch k {
@@ -32,8 +33,10 @@ func (k sortKey) String() string {
 		return "pid"
 	case sortName:
 		return "name"
-	default:
+	case sortTime:
 		return "time"
+	default:
+		return "io"
 	}
 }
 
@@ -49,8 +52,13 @@ func (k sortKey) compare(a, b proc.Process) int {
 		return cmp.Compare(a.PID, b.PID)
 	case sortName:
 		return strings.Compare(strings.ToLower(a.Command), strings.ToLower(b.Command))
-	default:
+	case sortTime:
 		return cmp.Compare(b.CPUTime, a.CPUTime)
+	default:
+		// Neither direction of the disk traffic is the interesting one on
+		// its own: what the column is asked is which process is moving the
+		// most, whichever way it is going.
+		return cmp.Compare(b.Disk.Total(), a.Disk.Total())
 	}
 }
 
@@ -67,12 +75,12 @@ func parseSortKey(name string) (sortKey, error) {
 			return k, nil
 		}
 	}
-	return sortCPU, fmt.Errorf("unknown sort column %q (want cpu, mem, pid, name or time)", name)
+	return sortCPU, fmt.Errorf("unknown sort column %q (want cpu, mem, pid, name, time or io)", name)
 }
 
 // descendingFirst reports whether the column starts on its most useful
 // direction: biggest first for the measurements, smallest first for the
 // identifiers.
 func (k sortKey) descendingFirst() bool {
-	return k == sortCPU || k == sortMem || k == sortTime
+	return k == sortCPU || k == sortMem || k == sortTime || k == sortIO
 }

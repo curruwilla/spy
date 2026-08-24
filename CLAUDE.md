@@ -1,15 +1,18 @@
 # spy
 
-Terminal system monitor: CPU, memory and processes on one screen. Go + Bubble Tea,
-reading Linux `/proc` directly with no third-party metrics library.
+Terminal system monitor: CPU, memory, disk and network throughput and processes on one
+screen. Go + Bubble Tea, reading Linux `/proc` directly with no third-party metrics
+library.
 
 ## Layout
 
 - `cmd/spy` — flag parsing only, hands over to `ui.Run`.
-- `internal/proc` — everything that touches `/proc`. Counters there are cumulative,
-  so `Collector` keeps the previous reading and turns the difference into percentages.
-  It is not safe for concurrent use: exactly one `Collect` runs at a time, scheduled by
-  the previous snapshot.
+- `internal/proc` — everything that touches `/proc`, plus `/sys` for the temperature.
+  Counters there are cumulative, so `Collector` keeps the previous reading and turns
+  the difference into percentages and byte rates. It is not safe for concurrent use:
+  exactly one `Collect` runs at a time, scheduled by the previous snapshot. `Details`
+  is the exception — it reads a handful of files for the one process the panel is open
+  on, touches no collector state that changes, and so runs on the update loop.
 - `internal/ui` — Bubble Tea model, key handling and rendering. `buildRows` is the one
   place that applies filter, sort and tree mode.
 
@@ -18,9 +21,16 @@ reading Linux `/proc` directly with no third-party metrics library.
 - Tests use the standard library only, table-driven, with `/proc` fixtures in
   `internal/proc/testdata`. No live-system assumptions except in `run_test.go`.
 - The screen is a fixed header plus a 1-line footer; the table gets the rest
-  (`tableHeight`). The header is 10 lines, or 7 on a terminal shorter than
-  `compactHeight`, where it drops the top margin and the spacers. Keep
-  `headerLines` and `headerLinesCompact` in sync when adding header lines.
+  (`tableHeight`). The header is 11 lines, or 7 on a terminal shorter than
+  `compactHeight`, where it drops the top margin, the spacers and the `hist` line.
+  Keep `headerLines` and `headerLinesCompact` in sync when adding header lines.
+- Every detail on the right of the header starts at one column: `gaugeCells` sizes the
+  bars from the widest of them, and `sparkCells` gives the spark lines the room a bar
+  and its percentage take up together. Measure with `lipgloss.Width`, never `len`: the
+  glyphs and the separators are multi-byte.
+- The table is `columns`, one descriptor per column. `visibleColumns` drops the disk
+  pair on a terminal too narrow for them, so nothing may assume a cell's position —
+  `cellValue` and `cellStyle` switch on the `columnID`.
 - Everything is laid out in `inner()`, the terminal less a `gutter` on each side,
   and `View` indents the finished lines into it. Use `m.inner()`, never `m.width`,
   when measuring a line.

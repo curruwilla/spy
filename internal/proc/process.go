@@ -26,6 +26,21 @@ type Process struct {
 	Threads int
 	Command string
 	Kernel  bool // a kernel thread: no command line of its own, no user code
+
+	// Disk is what the process moved to and from the block layer, in bytes
+	// per second. Reading it needs privileges over the process, so for
+	// somebody else's processes DiskKnown is false and the rates are not
+	// zero traffic but no answer at all.
+	Disk      Throughput
+	DiskKnown bool
+}
+
+// sample is the pair of cumulative counters a process's rates are measured
+// against: the ticks it has burned and the bytes it has moved.
+type sample struct {
+	busy uint64
+	io   ioCounters
+	ioOK bool
 }
 
 // kthreaddPID is the kernel thread daemon, which every kernel thread hangs
@@ -49,36 +64,44 @@ func (c *Collector) readProcesses(memTotal uint64, uptime time.Duration, elapsed
 	}
 
 	procs := make([]Process, 0, len(names))
-	busyTicks := make(map[int]uint64, len(names))
+	samples := make(map[int]sample, len(names))
 	for _, name := range names {
 		pid, err := strconv.Atoi(name)
 		if err != nil {
 			continue // not a process directory
 		}
-		p, busy, err := c.readProcess(pid, memTotal, uptime)
+		p, cur, err := c.readProcess(pid, memTotal, uptime)
 		if err != nil {
 			continue // vanished mid-read
 		}
-		busyTicks[pid] = busy
-		if prev, ok := c.prevProc[pid]; ok && elapsed > 0 && busy >= prev {
-			p.CPU = float64(busy-prev) / userHZ / elapsed * 100
+		samples[pid] = cur
+		p.DiskKnown = cur.ioOK
+		if prev, ok := c.prevProc[pid]; ok && elapsed > 0 {
+			if cur.busy >= prev.busy {
+				p.CPU = float64(cur.busy-prev.busy) / userHZ / elapsed * 100
+			}
+			// Two readings of the same process: a pid that was reused
+			// between them has no comparable previous counters.
+			if cur.ioOK && prev.ioOK {
+				p.Disk = cur.io.rate(prev.io, elapsed)
+			}
 		}
 		procs = append(procs, p)
 	}
-	c.prevProc = busyTicks
+	c.prevProc = samples
 	return procs, nil
 }
 
-// readProcess reads one pid. It returns the process and its cumulative busy
-// ticks, which the caller diffs against the previous snapshot.
-func (c *Collector) readProcess(pid int, memTotal uint64, uptime time.Duration) (Process, uint64, error) {
+// readProcess reads one pid. It returns the process and its cumulative
+// counters, which the caller diffs against the previous snapshot.
+func (c *Collector) readProcess(pid int, memTotal uint64, uptime time.Duration) (Process, sample, error) {
 	data, err := os.ReadFile(c.path(strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return Process{}, 0, err
+		return Process{}, sample{}, err
 	}
 	st, err := parseStat(data)
 	if err != nil {
-		return Process{}, 0, err
+		return Process{}, sample{}, err
 	}
 
 	rss := st.rssPages * c.pageSize
@@ -97,7 +120,8 @@ func (c *Collector) readProcess(pid int, memTotal uint64, uptime time.Duration) 
 		Command: c.command(pid, st.comm),
 		Kernel:  pid == kthreaddPID || st.ppid == kthreaddPID,
 	}
-	return p, st.busyTicks(), nil
+	io, ok := readProcIO(c.path(strconv.Itoa(pid), "io"))
+	return p, sample{busy: st.busyTicks(), io: io, ioOK: ok}, nil
 }
 
 // processUptime turns a start time counted in ticks since boot into how

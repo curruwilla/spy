@@ -119,6 +119,181 @@ func TestGaugesGrowWithTheScreenAndKeepTheirDetail(t *testing.T) {
 	}
 }
 
+// loaded is a machine with something to say on every header line: cores
+// under load, traffic on both the disk and the network, and a processor
+// warm enough to have a temperature worth showing.
+func loaded(t *testing.T) Model {
+	t.Helper()
+	m := testModel(t, sample())
+	m.width, m.height = 120, 30
+	m.snap.CPU = proc.CPU{
+		Total: 42, Cores: halfLoaded(8),
+		Model: "Intel Core i7-8700K", Temp: 52,
+	}
+	m.snap.Disk = proc.Throughput{In: 12 << 20, Out: 4 << 20}
+	m.snap.Net = proc.Throughput{In: 1 << 20, Out: 512 << 10}
+	m.history = halfLoaded(40)
+	m.clampView()
+	return m
+}
+
+// headerLine is the header line starting with the given label.
+func headerLine(t *testing.T, m Model, label string) string {
+	t.Helper()
+	for _, line := range m.viewHeader() {
+		if strings.HasPrefix(line, label) {
+			return line
+		}
+	}
+	t.Fatalf("no header line labelled %q:\n%s", label, strings.Join(m.viewHeader(), "\n"))
+	return ""
+}
+
+// TestHeaderShowsTheTrafficAndTheTemperature covers the readings that have
+// no gauge of their own: they ride on the right of the lines that do.
+func TestHeaderShowsTheTrafficAndTheTemperature(t *testing.T) {
+	m := loaded(t)
+	for _, c := range []struct{ label, want string }{
+		{"core", "disk read 12M/s  write 4.0M/s"},
+		{"hist", "net rx 1.0M/s  tx 512K/s"},
+		{"CPU", "temp 52°C"},
+	} {
+		if line := headerLine(t, m, c.label); !strings.Contains(line, c.want) {
+			t.Errorf("the %s line is missing %q: %q", c.label, c.want, line)
+		}
+	}
+}
+
+// TestHeaderDetailsShareAColumn covers the shape of the header: every
+// detail on the right starts at the same place, whether the line it is on
+// carries a bar or a spark line.
+func TestHeaderDetailsShareAColumn(t *testing.T) {
+	for _, width := range []int{160, 120, 100, 90} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := loaded(t)
+			m.width = width
+
+			at := map[string]int{
+				"core": detailColumn(headerLine(t, m, "core"), "disk"),
+				"hist": detailColumn(headerLine(t, m, "hist"), "net"),
+				"CPU":  detailColumn(headerLine(t, m, "CPU"), "load"),
+				"MEM":  detailColumn(headerLine(t, m, "MEM"), "used"),
+			}
+			for label, column := range at {
+				if column < 0 {
+					t.Fatalf("the %s line lost its detail at %d columns", label, width)
+				}
+				if column != at["CPU"] {
+					t.Errorf("the %s detail starts at column %d, want %d like the rest:\n%s",
+						label, column, at["CPU"], strings.Join(m.viewHeader(), "\n"))
+				}
+			}
+		})
+	}
+}
+
+// detailColumn is the column a header line's detail starts at. The bars
+// and the spark cells are multi-byte glyphs, so where the label sits in
+// the string is not where it sits on the screen.
+func detailColumn(line, label string) int {
+	i := strings.Index(line, label)
+	if i < 0 {
+		return -1
+	}
+	return lipgloss.Width(line[:i])
+}
+
+// TestHeaderWithoutASensorSaysNothing covers a machine that exposes no
+// temperature: an empty label would only raise the question.
+func TestHeaderWithoutASensorSaysNothing(t *testing.T) {
+	m := loaded(t)
+	m.snap.CPU.Temp = 0
+	if line := headerLine(t, m, "CPU"); strings.Contains(line, "temp") {
+		t.Errorf("cpu line = %q, want no temperature at all", line)
+	}
+}
+
+// TestTitleNamesTheProcessorWhileItFits covers the one detail with two
+// forms: the model is worth the room when there is room, and the count of
+// cores is what is left when there is not.
+func TestTitleNamesTheProcessorWhileItFits(t *testing.T) {
+	cases := []struct {
+		width int
+		want  string
+	}{
+		{160, "8 × Intel Core i7-8700K"},
+		{120, "8 × Intel Core i7-8700K"},
+		{48, "8 cores"},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprint(c.width), func(t *testing.T) {
+			m := loaded(t)
+			m.width = c.width
+			title := m.viewTitle()
+			if !strings.Contains(title, c.want) {
+				t.Errorf("title = %q, want it to hold %q", title, c.want)
+			}
+			if w := lipgloss.Width(title); w != m.inner() {
+				t.Errorf("title is %d columns wide, want the full %d", w, m.inner())
+			}
+		})
+	}
+}
+
+// TestTitleWithoutAProcessorName covers the machines that do not say what
+// they are: the core count is all there is to show.
+func TestTitleWithoutAProcessorName(t *testing.T) {
+	m := loaded(t)
+	m.snap.CPU.Model = ""
+	if title := m.viewTitle(); !strings.Contains(title, "8 cores") {
+		t.Errorf("title = %q, want the core count on its own", title)
+	}
+}
+
+// TestTailValuesKeepsTheNewest covers the trend line: what does not fit is
+// dropped from the old end, because a trend is read from the right.
+func TestTailValuesKeepsTheNewest(t *testing.T) {
+	values := make([]float64, 100)
+	for i := range values {
+		values[i] = float64(i)
+	}
+	cases := []struct {
+		name   string
+		values []float64
+		width  int
+		want   []float64
+	}{
+		{name: "all of it", values: values[:4], width: 40, want: values[:4]},
+		{name: "the newest end", values: values, width: 10, want: values[92:]},
+		{name: "nothing to draw", values: nil, width: 10},
+		{name: "no room at all", values: values, width: 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := tailValues(c.values, c.width)
+			if fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Errorf("tailValues(%d values, %d) = %v, want %v", len(c.values), c.width, got, c.want)
+			}
+			if w := lipgloss.Width(sparkline(got, c.width)); w > c.width {
+				t.Errorf("the line it draws is %d columns wide, want at most %d", w, c.width)
+			}
+		})
+	}
+}
+
+// TestSparkWidthCountsTheGaps keeps the two halves of the spark line in
+// step: what tailValues measures with and what sparkline then draws.
+func TestSparkWidthCountsTheGaps(t *testing.T) {
+	for n := 1; n <= 40; n++ {
+		if got, want := sparkWidth(n), lipgloss.Width(sparkline(halfLoaded(n), sparkWidth(n))); got != want {
+			t.Errorf("sparkWidth(%d) = %d, but the line it draws is %d wide", n, got, want)
+		}
+	}
+	if got := sparkWidth(0); got != 0 {
+		t.Errorf("sparkWidth(0) = %d, want 0", got)
+	}
+}
+
 // TestActiveMarksWhatIsDoingSomething covers which rows are emphasised:
 // what holds a core, a slice of one, or a serious amount of memory.
 func TestActiveMarksWhatIsDoingSomething(t *testing.T) {

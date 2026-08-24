@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,8 +66,8 @@ func TestTabCyclesColumns(t *testing.T) {
 		t.Errorf("tab from cpu = %v, want mem", got)
 	}
 	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
-	if got := back.(Model).sort; got != sortTime {
-		t.Errorf("shift+tab from cpu = %v, want time (wraps around)", got)
+	if got := back.(Model).sort; got != sortIO {
+		t.Errorf("shift+tab from cpu = %v, want io (wraps around)", got)
 	}
 }
 
@@ -297,19 +298,106 @@ func TestPromptsSurviveARefreshError(t *testing.T) {
 }
 
 func TestKillAsksForConfirmation(t *testing.T) {
-	m := testModel(t, sample())
-	m = press(t, m, "x")
-	if m.mode != modeConfirm {
-		t.Fatal("x should ask before sending a signal")
+	m := press(t, testModel(t, sample()), "x")
+	if m.mode != modeSignal {
+		t.Fatal("x should offer the signals before sending one")
 	}
 	if m.confirm.PID != m.rows[0].proc.PID {
 		t.Errorf("confirming pid %d, want the selected %d", m.confirm.PID, m.rows[0].proc.PID)
+	}
+	if signals[m.signal].number != syscall.SIGTERM {
+		t.Errorf("the list opened on %s, want SIGTERM", signals[m.signal].name)
+	}
+
+	sent, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m = sent.(Model); m.mode != modeConfirm {
+		t.Fatalf("enter left mode %v, want the confirmation", m.mode)
+	}
+	if !strings.Contains(m.View(), "send SIGTERM to") {
+		t.Error("the confirmation should name the signal it is about to send")
 	}
 
 	m = press(t, m, "n")
 	if m.mode != modeNormal || !strings.Contains(m.status, "cancelled") {
 		t.Errorf("anything but y cancels, got mode=%v status=%q", m.mode, m.status)
 	}
+}
+
+// TestSignalPickerSendsWhatWasPicked is the point of the list: the signal
+// that reaches the process is the one the cursor was left on.
+func TestSignalPickerSendsWhatWasPicked(t *testing.T) {
+	var gotPID int
+	var gotSignal syscall.Signal
+	defer stubSignals(t, func(pid int, sig syscall.Signal) error {
+		gotPID, gotSignal = pid, sig
+		return nil
+	})()
+
+	m := press(t, testModel(t, sample()), "x")
+	// SIGKILL is three above SIGTERM in the list.
+	m = press(t, m, "k", "k", "k")
+	if signals[m.signal].number != syscall.SIGKILL {
+		t.Fatalf("cursor on %s, want SIGKILL", signals[m.signal].name)
+	}
+	if !strings.Contains(m.View(), "SIGKILL") {
+		t.Error("the panel should show the signals to pick from")
+	}
+
+	chosen, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = press(t, chosen.(Model), "y")
+
+	if gotPID != m.confirm.PID || gotSignal != syscall.SIGKILL {
+		t.Errorf("sent %v to %d, want SIGKILL to %d", gotSignal, gotPID, m.confirm.PID)
+	}
+	if !strings.Contains(m.status, "SIGKILL sent") {
+		t.Errorf("status = %q, want it to say what was sent", m.status)
+	}
+}
+
+func TestSignalPickerCancels(t *testing.T) {
+	defer stubSignals(t, func(int, syscall.Signal) error {
+		t.Error("a cancelled prompt should send nothing")
+		return nil
+	})()
+
+	for _, key := range []string{"esc", "q", "x"} {
+		t.Run(key, func(t *testing.T) {
+			m := press(t, testModel(t, sample()), "x")
+			var msg tea.KeyMsg
+			if key == "esc" {
+				msg = tea.KeyMsg{Type: tea.KeyEsc}
+			} else {
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+			}
+			next, _ := m.Update(msg)
+			if m = next.(Model); m.mode != modeNormal || !strings.Contains(m.status, "cancelled") {
+				t.Errorf("%q left mode %v status %q, want it cancelled", key, m.mode, m.status)
+			}
+		})
+	}
+}
+
+// TestSignalReportsARefusal covers the kill that does not go through:
+// somebody else's process, or one that left between the prompt and the y.
+func TestSignalReportsARefusal(t *testing.T) {
+	defer stubSignals(t, func(int, syscall.Signal) error { return syscall.EPERM })()
+
+	m := press(t, testModel(t, sample()), "x")
+	sent, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = press(t, sent.(Model), "y")
+
+	if !strings.Contains(m.status, "SIGTERM") || !strings.Contains(m.status, "not permitted") {
+		t.Errorf("status = %q, want the refusal and the signal it was about", m.status)
+	}
+}
+
+// stubSignals swaps the kill out for the duration of a test and returns
+// the call that puts the real one back.
+func stubSignals(t *testing.T, fn func(int, syscall.Signal) error) func() {
+	t.Helper()
+	previous := sendSignal
+	sendSignal = fn
+	return func() { sendSignal = previous }
 }
 
 // detailed is one process with every field the panel shows filled in.
@@ -535,6 +623,223 @@ func TestInfoPanelClosesWhenTheProcessGoes(t *testing.T) {
 	}
 }
 
+// TestPauseHoldsTheScreenStill covers what space is for: the refresh stops
+// where it is, and the timer keeps beating so that letting go resumes it.
+func TestPauseHoldsTheScreenStill(t *testing.T) {
+	m := testModel(t, sample())
+	m.interval = time.Millisecond
+
+	m = press(t, m, " ")
+	if !m.paused {
+		t.Fatal("space should hold the refresh")
+	}
+	if !strings.Contains(m.View(), "paused") {
+		t.Error("a screen that is no longer refreshing has to say so")
+	}
+
+	// The tick has to come back as another tick rather than as a reading:
+	// this model has no collector to read with, and a paused one must not
+	// go looking for it.
+	next, cmd := m.Update(tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("a paused monitor dropped its timer, so nothing would resume it")
+	}
+	if _, ok := cmd().(tickMsg); !ok {
+		t.Error("a paused tick should re-arm the timer, not collect")
+	}
+
+	if m = press(t, next.(Model), " "); m.paused {
+		t.Error("space again should let it go")
+	}
+}
+
+// TestFollowKeepsTheCursorOnAProcess covers the opposite rule to the
+// default one: with f pressed the cursor leaves its line and goes wherever
+// the process it is watching went.
+func TestFollowKeepsTheCursorOnAProcess(t *testing.T) {
+	m := press(t, testModel(t, sample()), "j") // second row by cpu: pid 10
+	m = press(t, m, "f")
+	if m.follow != 10 {
+		t.Fatalf("following %d, want the selected 10", m.follow)
+	}
+	if !strings.Contains(m.View(), "following 10") {
+		t.Error("the footer should say which process the cursor is locked to")
+	}
+
+	// pid 10 becomes the busiest, so it moves to the top and the cursor
+	// goes with it instead of staying on the second row.
+	refreshed := sample()
+	refreshed[1].CPU = 99
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: refreshed}})
+	m = next.(Model)
+	if got, _ := m.selected(); got.PID != 10 || m.cursor != 0 {
+		t.Errorf("cursor on row %d holding pid %d, want the first row and pid 10", m.cursor, got.PID)
+	}
+
+	// Moving the cursor by hand is the reader taking it back.
+	m = press(t, m, "j")
+	if m.follow != 0 {
+		t.Errorf("still following %d after the cursor was moved", m.follow)
+	}
+}
+
+// TestFollowSurvivesAFilter covers a followed process the table stops
+// listing: it is still running, so there is still something to follow.
+func TestFollowSurvivesAFilter(t *testing.T) {
+	m := press(t, testModel(t, sample()), "j", "f") // pid 10, nginx
+	m = press(t, m, "/", "e", "d", "i")             // only editor matches
+	done, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m = done.(Model); m.follow != 10 {
+		t.Errorf("stopped following %d because the filter hid it", 10)
+	}
+}
+
+// TestFollowEndsWithTheProcess covers the one thing that does release the
+// lock on its own.
+func TestFollowEndsWithTheProcess(t *testing.T) {
+	m := press(t, testModel(t, sample()), "j", "f") // pid 10
+
+	survivors := append(sample()[:1], sample()[2:]...)
+	next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{Processes: survivors}})
+	m = next.(Model)
+
+	if m.follow != 0 {
+		t.Errorf("still following %d, which is gone", m.follow)
+	}
+	if !strings.Contains(m.status, "10 exited") {
+		t.Errorf("status = %q, want the reason the cursor was let go", m.status)
+	}
+}
+
+func TestRenice(t *testing.T) {
+	var gotPID, gotNice int
+	defer stubPriority(t, func(pid, nice int) error {
+		gotPID, gotNice = pid, nice
+		return nil
+	})()
+
+	m := testModel(t, sample())
+	m = press(t, m, "]")
+	if gotPID != m.rows[0].proc.PID || gotNice != 1 {
+		t.Errorf("] reniced %d to %d, want the selected process one step up", gotPID, gotNice)
+	}
+	if !strings.Contains(m.status, "nice 1") {
+		t.Errorf("status = %q, want what it was set to", m.status)
+	}
+
+	m = press(t, m, "[")
+	if gotNice != -1 {
+		t.Errorf("[ set nice %d, want one step down", gotNice)
+	}
+}
+
+// TestReniceStopsAtTheEndsOfTheRange covers the two ends of what the
+// scheduler takes: there is nothing beyond them to ask for.
+func TestReniceStopsAtTheEndsOfTheRange(t *testing.T) {
+	defer stubPriority(t, func(int, int) error {
+		t.Error("want no call for a process already at the end of the range")
+		return nil
+	})()
+
+	procs := sample()
+	procs[2].Nice = maxNice // the busiest, so it is the row under the cursor
+	m := testModel(t, procs)
+	if got, _ := m.selected(); got.Nice != maxNice {
+		t.Fatalf("selected pid %d with nice %d, want the one at the end of the range", got.PID, got.Nice)
+	}
+	if m = press(t, m, "]"); !strings.Contains(m.status, "already") {
+		t.Errorf("status = %q, want it to say there is nowhere further to go", m.status)
+	}
+}
+
+func TestReniceReportsARefusal(t *testing.T) {
+	defer stubPriority(t, func(int, int) error { return syscall.EACCES })()
+
+	m := press(t, testModel(t, sample()), "[")
+	if !strings.Contains(m.status, "renice") || !strings.Contains(m.status, "denied") {
+		t.Errorf("status = %q, want the refusal", m.status)
+	}
+}
+
+// TestMousePicksAndScrolls covers the two things a mouse is for: the wheel
+// moves through the table and a click lands on the row under the pointer.
+func TestMousePicksAndScrolls(t *testing.T) {
+	many := make([]proc.Process, 60)
+	for i := range many {
+		many[i] = proc.Process{PID: i + 1, Command: "proc", CPU: float64(100 - i)}
+	}
+	m := testModel(t, many)
+	m.width, m.height = 100, 30
+	m.clampView()
+
+	clicked, _ := m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		Y:      m.headerHeight() + 3,
+	})
+	if m = clicked.(Model); m.cursor != 3 {
+		t.Errorf("clicking the fourth row of the table left the cursor at %d, want 3", m.cursor)
+	}
+
+	scrolled, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	if m = scrolled.(Model); m.cursor != 3+wheelStep {
+		t.Errorf("cursor = %d, want it a wheel notch further down", m.cursor)
+	}
+	back, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
+	if m = back.(Model); m.cursor != 3 {
+		t.Errorf("cursor = %d, want it back where it was", m.cursor)
+	}
+
+	// A click above the table is not a click on a row.
+	header, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: 1})
+	if got := header.(Model).cursor; got != 3 {
+		t.Errorf("a click on the header moved the cursor to %d", got)
+	}
+}
+
+// TestMouseIsIgnoredUnderAPanel covers the panel covering the table: there
+// is no row under the pointer to pick.
+func TestMouseIsIgnoredUnderAPanel(t *testing.T) {
+	m := press(t, testModel(t, sample()), "i")
+	next, _ := m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		Y:      m.headerHeight() + 1,
+	})
+	if got := next.(Model); got.cursor != m.cursor || got.mode != modeInfo {
+		t.Errorf("cursor %d mode %v, want the panel untouched", got.cursor, got.mode)
+	}
+}
+
+// TestHistoryKeepsTheNewestReadings covers the trend line's buffer: it
+// grows with every snapshot and never past what it is allowed to hold.
+func TestHistoryKeepsTheNewestReadings(t *testing.T) {
+	m := testModel(t, sample())
+	for i := range historyLength + 50 {
+		next, _ := m.Update(snapshotMsg{snap: proc.Snapshot{
+			CPU:       proc.CPU{Total: float64(i % 100)},
+			Processes: sample(),
+		}})
+		m = next.(Model)
+	}
+	if len(m.history) != historyLength {
+		t.Errorf("history holds %d readings, want it capped at %d", len(m.history), historyLength)
+	}
+	if want := float64((historyLength + 49) % 100); m.history[len(m.history)-1] != want {
+		t.Errorf("newest reading = %v, want %v", m.history[len(m.history)-1], want)
+	}
+}
+
+// stubPriority swaps the renice out for the duration of a test and returns
+// the call that puts the real one back.
+func stubPriority(t *testing.T, fn func(pid, nice int) error) func() {
+	t.Helper()
+	previous := setPriority
+	setPriority = fn
+	return func() { setPriority = previous }
+}
+
 // TestFooterHelpFitsTheWidth covers the footer dropping hints instead of
 // wrapping, which would push the bottom line off the screen.
 func TestFooterHelpFitsTheWidth(t *testing.T) {
@@ -605,7 +910,7 @@ func TestHeaderSeparatesItsGroups(t *testing.T) {
 		height int
 		blanks []int // header lines expected to be empty
 	}{
-		{"tall", 30, []int{0, 2, 5, 8}},
+		{"tall", 30, []int{0, 2, 6, 9}},
 		{"compact", compactHeight - 1, []int{3}},
 	}
 	for _, c := range cases {
@@ -661,8 +966,17 @@ func TestBarsFillTheWholeLine(t *testing.T) {
 	refused := base
 	refused.mode, refused.input, refused.status = modeThreshold, "cpu>x", "unknown threshold"
 
-	confirming := base
-	confirming.mode, confirming.confirm = modeConfirm, sample()[0]
+	picking := base
+	picking.mode, picking.confirm, picking.signal = modeSignal, sample()[0], defaultSignal()
+
+	confirming := picking
+	confirming.mode = modeConfirm
+
+	held := base
+	held.paused = true
+
+	locked := base
+	locked.follow = 10
 
 	failed := base
 	failed.err = errFake
@@ -679,7 +993,10 @@ func TestBarsFillTheWholeLine(t *testing.T) {
 		{"footer", base.viewFooter()},
 		{"filter prompt", filtering.viewFooter()},
 		{"refused threshold", refused.viewFooter()},
+		{"signal list", picking.viewFooter()},
 		{"kill confirmation", confirming.viewFooter()},
+		{"paused", held.viewFooter()},
+		{"following a process", locked.viewFooter()},
 		{"refresh error", failed.viewFooter()},
 		{"status message", noted.viewFooter()},
 		{"open panel", informing.viewFooter()},

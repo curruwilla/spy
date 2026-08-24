@@ -65,6 +65,22 @@ func TestFlatSorting(t *testing.T) {
 	}
 }
 
+// TestSortByDiskWeighsBothDirections covers the io column: a process
+// writing hard and one reading hard are both busy, and the table is asked
+// which is busiest, not which is reading.
+func TestSortByDiskWeighsBothDirections(t *testing.T) {
+	procs := []proc.Process{
+		{PID: 1, Command: "idle"},
+		{PID: 10, Command: "reader", Disk: proc.Throughput{In: 900}, DiskKnown: true},
+		{PID: 11, Command: "writer", Disk: proc.Throughput{Out: 1000}, DiskKnown: true},
+		{PID: 20, Command: "both", Disk: proc.Throughput{In: 600, Out: 600}, DiskKnown: true},
+	}
+	got := pids(buildRows(procs, sortIO, false, filter{}, false))
+	if want := []int{20, 11, 10, 1}; !equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestFilterMatchesCommandUserAndPID(t *testing.T) {
 	cases := []struct {
 		filter string

@@ -28,6 +28,27 @@ func formatBytes(b uint64) string {
 	return fmt.Sprintf("%.0fP", value)
 }
 
+// formatRate renders a byte rate for a table cell, the size on its own
+// because the column title carries the "per second". A process whose
+// counters the reader is not allowed to look at is not an idle one, so it
+// says so rather than showing a zero.
+func formatRate(bytesPerSecond float64, known bool) string {
+	switch {
+	case !known:
+		return "-"
+	case bytesPerSecond < 1:
+		return "0"
+	default:
+		return formatBytes(uint64(bytesPerSecond))
+	}
+}
+
+// formatPerSecond renders a byte rate for the header, where there is room
+// to spell the unit out.
+func formatPerSecond(bytesPerSecond float64) string {
+	return formatBytes(uint64(bytesPerSecond)) + "/s"
+}
+
 // formatCPUTime renders accumulated CPU time as hh:mm:ss, dropping the hours
 // while they are zero.
 func formatCPUTime(d time.Duration) string {

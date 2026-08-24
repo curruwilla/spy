@@ -1,0 +1,11 @@
+Name:	myprog
+State:	S (sleeping)
+Tgid:	1234
+Pid:	1234
+PPid:	7
+Threads:	4
+VmSize:	  120563 kB
+VmRSS:	    8192 kB
+VmSwap:	    2048 kB
+voluntary_ctxt_switches:	1500
+nonvoluntary_ctxt_switches:	120

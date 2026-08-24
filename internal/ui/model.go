@@ -11,17 +11,43 @@ import (
 )
 
 // mode is what the screen is currently doing: showing the table, reading a
-// filter or a set of thresholds, asking to confirm a kill, or holding the
-// detail panel open over the table.
+// filter or a set of thresholds, picking a signal, asking to confirm the
+// kill, or holding the detail panel open over the table.
 type mode int
 
 const (
 	modeNormal mode = iota
 	modeFilter
 	modeThreshold
+	modeSignal
 	modeConfirm
 	modeInfo
 )
+
+// The two operations that reach outside the program. They are variables so
+// the tests can drive the keys that lead to them without signalling
+// anything real.
+var (
+	sendSignal  = syscall.Kill
+	setPriority = func(pid, nice int) error {
+		return syscall.Setpriority(syscall.PRIO_PROCESS, pid, nice)
+	}
+)
+
+// The range the scheduler takes, from the most urgent to the most patient.
+// See setpriority(2).
+const (
+	minNice = -20
+	maxNice = 19
+)
+
+// wheelStep is how far one notch of the mouse wheel moves the cursor.
+const wheelStep = 3
+
+// historyLength is how many readings the trend line keeps. It is more than
+// the widest terminal has cells for, so the line is always drawn from the
+// newest end of a full buffer.
+const historyLength = 512
 
 // Options configures the monitor from the command line.
 type Options struct {
@@ -65,9 +91,15 @@ type Model struct {
 	cursor int // index into rows, kept where the user left it
 	offset int // first visible row, for scrolling
 
+	paused  bool      // the refresh is held, so the screen can be read
+	follow  int       // pid the cursor is locked to, 0 when it is free to stay put
+	history []float64 // total cpu of the last snapshots, oldest first
+
 	me      string       // account the monitor runs under, to mark its own processes
 	info    proc.Process // process the detail panel describes, fixed when it opened
+	details proc.Details // and what it costs a file of its own to know about it
 	confirm proc.Process // process awaiting a kill confirmation
+	signal  int          // index into signals, the one the kill prompt will send
 	status  string       // one-off message shown in the footer
 }
 
@@ -129,15 +161,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		if msg.err == nil {
 			m.snap = msg.snap
+			m.recordHistory()
 			m.rebuild()
 		}
 		return m, tick(m.interval)
 
 	case tickMsg:
+		// A paused monitor keeps the heartbeat and skips the reading, so
+		// there is still exactly one timer in flight to resume from.
+		if m.paused {
+			return m, tick(m.interval)
+		}
 		return m, m.collect()
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+// recordHistory adds the new reading to the trend line, dropping the
+// oldest once there is more of it than any screen can show.
+func (m *Model) recordHistory() {
+	m.history = append(m.history, m.snap.CPU.Total)
+	if len(m.history) > historyLength {
+		m.history = m.history[len(m.history)-historyLength:]
+	}
+}
+
+// handleMouse gives the table the two things a mouse is good for: the
+// wheel scrolls it, and a click picks the row under the pointer. Both are
+// ignored while a panel covers the table, because there is no row there.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeInfo || m.mode == modeSignal {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.moveCursor(-wheelStep)
+	case tea.MouseButtonWheelDown:
+		m.moveCursor(wheelStep)
+	case tea.MouseButtonLeft:
+		if msg.Action != tea.MouseActionPress {
+			return m, nil
+		}
+		// The rows start under the header, the column titles included.
+		row := m.offset + msg.Y - m.headerHeight()
+		if msg.Y >= m.headerHeight() && row < len(m.rows) {
+			m.follow, m.cursor = 0, row
+			m.clampView()
+		}
 	}
 	return m, nil
 }
@@ -148,6 +224,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilterKey(msg)
 	case modeThreshold:
 		return m.handleThresholdKey(msg)
+	case modeSignal:
+		return m.handleSignalKey(msg)
 	case modeConfirm:
 		return m.handleConfirmKey(msg)
 	case modeInfo:
@@ -180,6 +258,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sortBy(sortPID)
 	case "n":
 		m.sortBy(sortName)
+	case "d":
+		m.sortBy(sortIO)
 	case "tab":
 		m.sortBy(m.sort.next(1))
 	case "shift+tab":
@@ -188,6 +268,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		m.tree = !m.tree
 		m.rebuild()
+	case " ":
+		// Holding the screen still is the only way to read a busy table:
+		// the last snapshot stays up until it is let go.
+		m.paused = !m.paused
+	case "f":
+		m.toggleFollow()
+	case "[":
+		m.renice(-1)
+	case "]":
+		m.renice(1)
 	case "/":
 		m.mode = modeFilter
 	case "l":
@@ -199,13 +289,52 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// keypress, not about whatever the cursor points at later.
 		if p, ok := m.selected(); ok {
 			m.info, m.mode = p, modeInfo
+			m.readDetails()
 		}
 	case "x":
 		if p, ok := m.selected(); ok {
-			m.confirm, m.mode = p, modeConfirm
+			m.confirm, m.mode, m.signal = p, modeSignal, defaultSignal()
 		}
 	}
 	return m, nil
+}
+
+// toggleFollow locks the cursor onto the process under it, or lets it go.
+// Without it the cursor holds its line and the list moves under it, which
+// is what a reader watching the top of the table wants; with it the cursor
+// holds one process wherever the sorting sends it.
+func (m *Model) toggleFollow() {
+	if m.follow != 0 {
+		m.follow, m.status = 0, "following nothing"
+		return
+	}
+	p, ok := m.selected()
+	if !ok {
+		return
+	}
+	m.follow = p.PID
+	m.status = fmt.Sprintf("following %d %s", p.PID, firstWord(p.Command))
+}
+
+// renice moves the selected process along the scheduler's range: down
+// towards the urgent end, which only root may do, or up towards the
+// patient one, which anybody may do to their own processes. A refusal is
+// reported in the footer like any other.
+func (m *Model) renice(delta int) {
+	p, ok := m.selected()
+	if !ok {
+		return
+	}
+	nice := clamp(p.Nice+delta, minNice, maxNice)
+	if nice == p.Nice {
+		m.status = fmt.Sprintf("%d is already at nice %d", p.PID, nice)
+		return
+	}
+	if err := setPriority(p.PID, nice); err != nil {
+		m.status = fmt.Sprintf("renice %d: %v", p.PID, err)
+		return
+	}
+	m.status = fmt.Sprintf("%d now nice %d", p.PID, nice)
 }
 
 func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -264,18 +393,42 @@ func (m Model) handleThresholdKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleSignalKey drives the signal list. Which signal to send is a real
+// choice — reload, stop, freeze, take out — so the prompt is a list to
+// move through rather than a number to remember.
+func (m Model) handleSignalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.signal = clamp(m.signal-1, 0, len(signals)-1)
+	case "down", "j":
+		m.signal = clamp(m.signal+1, 0, len(signals)-1)
+	case "home", "g":
+		m.signal = 0
+	case "end", "G":
+		m.signal = len(signals) - 1
+	case "enter":
+		m.mode = modeConfirm
+	case "esc", "q", "x":
+		m.mode, m.status = modeNormal, "kill cancelled"
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 // handleConfirmKey answers the kill prompt: only an explicit y signs off.
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.mode = modeNormal
+	chosen := signals[m.signal]
 	if msg.String() != "y" && msg.String() != "Y" {
 		m.status = "kill cancelled"
 		return m, nil
 	}
-	if err := syscall.Kill(m.confirm.PID, syscall.SIGTERM); err != nil {
-		m.status = fmt.Sprintf("kill %d: %v", m.confirm.PID, err)
+	if err := sendSignal(m.confirm.PID, chosen.number); err != nil {
+		m.status = fmt.Sprintf("%s to %d: %v", chosen.name, m.confirm.PID, err)
 		return m, nil
 	}
-	m.status = fmt.Sprintf("SIGTERM sent to %d", m.confirm.PID)
+	m.status = fmt.Sprintf("%s sent to %d", chosen.name, m.confirm.PID)
 	return m, nil
 }
 
@@ -311,8 +464,12 @@ func (m *Model) jumpToTop() {
 	m.cursor, m.offset = 0, 0
 }
 
+// moveCursor is the reader taking the cursor somewhere, which is also the
+// answer to "stop following that process": the two ways of choosing a row
+// cannot both be in charge of it.
 func (m *Model) moveCursor(delta int) {
 	m.cursor += delta
+	m.follow = 0
 	m.clampView()
 }
 
@@ -328,9 +485,34 @@ func (m Model) selected() (proc.Process, bool) {
 func (m *Model) rebuild() {
 	m.rows = buildRows(m.snap.Processes, m.sort, m.reverse, m.filter, m.tree)
 	m.clampView()
+	m.followCursor()
 	if m.mode == modeInfo {
 		m.refreshInfo()
 	}
+}
+
+// followCursor drags the cursor back onto the process it is locked to. A
+// process that is only missing from the table is still there to follow —
+// the filter hides it, the tree may have it collapsed — but one that has
+// left the machine releases the lock, because nothing will bring it back.
+func (m *Model) followCursor() {
+	if m.follow == 0 {
+		return
+	}
+	for i, r := range m.rows {
+		if r.proc.PID == m.follow {
+			m.cursor = i
+			m.clampView()
+			return
+		}
+	}
+	for _, p := range m.snap.Processes {
+		if p.PID == m.follow {
+			return
+		}
+	}
+	m.status = fmt.Sprintf("%d exited, following nothing", m.follow)
+	m.follow = 0
 }
 
 // refreshInfo re-reads the process the panel is pinned to, so its numbers
@@ -342,11 +524,25 @@ func (m *Model) refreshInfo() {
 	for _, p := range m.snap.Processes {
 		if p.PID == m.info.PID {
 			m.info = p
+			m.readDetails()
 			return
 		}
 	}
 	m.mode = modeNormal
 	m.status = fmt.Sprintf("%d exited", m.info.PID)
+}
+
+// readDetails re-reads what the panel shows beyond the table's columns. It
+// is a handful of files for a single process, so it is read inline rather
+// than off the update loop, and it only touches collector state that never
+// changes, so a refresh already in flight is none the wiser. A model built
+// without a collector — every test but one — shows the panel without them.
+func (m *Model) readDetails() {
+	if m.collector == nil {
+		m.details = proc.Details{Files: -1}
+		return
+	}
+	m.details = m.collector.Details(m.info.PID)
 }
 
 // clampView keeps the cursor inside the list and the scroll window around

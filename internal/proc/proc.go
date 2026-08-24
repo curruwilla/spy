@@ -26,36 +26,47 @@ type Snapshot struct {
 	CPU       CPU
 	Memory    Memory
 	Load      Load
+	Disk      Throughput
+	Net       Throughput
 	Processes []Process
 }
 
-// CPU holds usage percentages for the whole machine and for each core.
+// CPU holds usage percentages for the whole machine and for each core,
+// along with what the processor is and how hot it is running.
 type CPU struct {
 	Total float64
 	Cores []float64
+	Model string  // what the processor calls itself, empty when unknown
+	Temp  float64 // degrees Celsius, 0 when the machine exposes no sensor
 }
 
 // Collector produces snapshots. It is not safe for concurrent use: call
 // Collect from a single goroutine.
 type Collector struct {
 	root     string
+	sys      string // sysfs, which is where the temperature comes from
 	pageSize uint64
+	model    string // the processor name, read once: it cannot change
 
 	prevCPU  []cpuTimes     // index 0 is the machine, 1..n the cores
-	prevProc map[int]uint64 // pid -> busy ticks at the previous collect
+	prevProc map[int]sample // pid -> its cumulative counters at the previous collect
+	prevDisk ioCounters
+	prevNet  ioCounters
 	prevAt   time.Time
 
 	users map[uint64]string // uid -> name, cached because lookups hit NSS
 }
 
 // NewCollector returns a collector reading the live /proc filesystem.
-func NewCollector() *Collector { return newCollector(defaultRoot) }
+func NewCollector() *Collector { return newCollector(defaultRoot, defaultSysRoot) }
 
-func newCollector(root string) *Collector {
+func newCollector(root, sys string) *Collector {
 	return &Collector{
 		root:     root,
+		sys:      sys,
 		pageSize: uint64(os.Getpagesize()),
-		prevProc: make(map[int]uint64),
+		model:    readCPUModel(root + "/cpuinfo"),
+		prevProc: make(map[int]sample),
 		users:    make(map[uint64]string),
 	}
 }
@@ -89,16 +100,28 @@ func (c *Collector) Collect() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read processes: %w", err)
 	}
+	// The traffic counters and the sensors are read last and their errors
+	// are not: they are secondary readings, and a monitor that refuses to
+	// refresh at all because one optional file is missing from a container
+	// is worse than one showing no throughput.
+	disk, _ := readDiskStats(c.path("diskstats"))
+	net, _ := readNetDev(c.path("net", "dev"))
+
+	cpu := cpuUsage(c.prevCPU, cpuTimes)
+	cpu.Model, cpu.Temp = c.model, readTemperature(c.sys)
 
 	snap := Snapshot{
 		At:        now,
 		Uptime:    uptime,
-		CPU:       cpuUsage(c.prevCPU, cpuTimes),
+		CPU:       cpu,
 		Memory:    mem,
 		Load:      load,
+		Disk:      disk.rate(c.prevDisk, elapsed),
+		Net:       net.rate(c.prevNet, elapsed),
 		Processes: procs,
 	}
 	c.prevCPU = cpuTimes
+	c.prevDisk, c.prevNet = disk, net
 	c.prevAt = now
 	return snap, nil
 }

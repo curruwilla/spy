@@ -32,7 +32,7 @@ func run() error {
 		showVersion             bool
 	)
 	flag.DurationVar(&opts.Interval, "i", 2*time.Second, "refresh interval")
-	flag.StringVar(&opts.Sort, "sort", "cpu", "initial sort column: cpu, mem, pid, name or time")
+	flag.StringVar(&opts.Sort, "sort", "cpu", "initial sort column: cpu, mem, pid, name, time or io")
 	flag.BoolVar(&opts.Tree, "tree", false, "start in process tree mode")
 	flag.StringVar(&opts.Filter, "filter", "", "only show processes matching this text")
 	flag.StringVar(&minCPU, "min-cpu", "", "only show processes using at least this much CPU, in percent of one core")
@@ -54,7 +54,9 @@ func run() error {
 		return fmt.Errorf("refresh interval %s is too short, use at least 100ms", opts.Interval)
 	}
 
-	return ui.Run(proc.NewCollector(), opts, tea.WithAltScreen())
+	// Cell motion is the quietest of the mouse modes: it reports the wheel
+	// and the clicks, and only follows the pointer while a button is down.
+	return ui.Run(proc.NewCollector(), opts, tea.WithAltScreen(), tea.WithMouseCellMotion())
 }
 
 // minClauses turns the -min-* flags into the same clause syntax the in-app

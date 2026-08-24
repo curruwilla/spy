@@ -15,8 +15,8 @@ import (
 // title, the CPU block and the memory block — with blank lines, which a
 // terminal too short to spare them gives back to the table.
 const (
-	headerLines        = 10 // top margin, cpu and memory blocks, spacers, column titles
-	headerLinesCompact = 7  // the same without the margin and the spacers
+	headerLines        = 11 // top margin, cpu and memory blocks, spacers, column titles
+	headerLinesCompact = 7  // the same without the margin, the spacers and the trend line
 	compactHeight      = 22 // terminal height below which the header sheds them
 	footerHeight       = 1
 )
@@ -41,26 +41,99 @@ func (m Model) headerHeight() int {
 	return headerLines
 }
 
-// Column widths. The command column takes all remaining space.
-const (
-	wPID   = 7
-	wUser  = 9
-	wState = 1
-	wCPU   = 5
-	wMem   = 5
-	wRSS   = 6
-	wTime  = 8
+// columnID names a table column, so a row can be styled and measured by
+// what a cell holds rather than by where it happens to sit.
+type columnID int
 
-	// Every column is separated by a single space.
-	fixedWidth = wPID + wUser + wState + wCPU + wMem + wRSS + wTime + 7
+const (
+	colPID columnID = iota
+	colUser
+	colState
+	colCPU
+	colMem
+	colRSS
+	colTime
+	colRead
+	colWrite
+	colCommand
 )
+
+// column is one column of the table: how wide it is drawn, which way its
+// values are aligned, and the sort it puts its arrow on.
+type column struct {
+	id       columnID
+	title    string
+	width    int // 0 for the command, which takes whatever the others leave
+	right    bool
+	key      sortKey
+	sortable bool
+}
+
+// columns is the table, in the order it is drawn. Memory sorts by the
+// bytes rather than by the percentage, so its arrow sits on MEM% while
+// RSS carries none; the two disk columns are one measurement split in
+// two, so the arrow goes on the first of them.
+var columns = []column{
+	{id: colPID, title: "PID", width: 7, right: true, key: sortPID, sortable: true},
+	{id: colUser, title: "USER", width: 9},
+	{id: colState, title: "S", width: 1},
+	{id: colCPU, title: "CPU%", width: 5, right: true, key: sortCPU, sortable: true},
+	{id: colMem, title: "MEM%", width: 5, right: true, key: sortMem, sortable: true},
+	{id: colRSS, title: "RSS", width: 6, right: true},
+	{id: colTime, title: "TIME", width: 8, right: true, key: sortTime, sortable: true},
+	{id: colRead, title: "RD/s", width: 6, right: true, key: sortIO, sortable: true},
+	{id: colWrite, title: "WR/s", width: 6, right: true},
+	{id: colCommand, title: "COMMAND", key: sortName, sortable: true},
+}
+
+// minCommandWidth is the least the command column is worth drawing in.
+const minCommandWidth = 20
+
+// visibleColumns is the table the width can afford. The disk pair is the
+// first thing a narrow terminal gives up: it is the least of what the
+// table says and the command is the most, and neither of them is worth
+// having if the command is down to a handful of characters.
+func (m Model) visibleColumns() []column {
+	if m.inner()-fixedWidth(columns) >= minCommandWidth {
+		return columns
+	}
+	narrow := make([]column, 0, len(columns))
+	for _, c := range columns {
+		if c.id != colRead && c.id != colWrite {
+			narrow = append(narrow, c)
+		}
+	}
+	return narrow
+}
+
+// fixedWidth is what a set of columns costs before the command gets its
+// share, the single space between each pair included.
+func fixedWidth(cols []column) int {
+	total := len(cols) - 1
+	for _, c := range cols {
+		total += c.width
+	}
+	return total
+}
+
+// width is how wide one column is drawn: what it asked for, or, for the
+// command, everything the others left.
+func (m Model) columnWidth(c column, cols []column) int {
+	if c.width > 0 {
+		return c.width
+	}
+	return max(10, m.inner()-fixedWidth(cols))
+}
 
 func (m Model) View() string {
 	lines := make([]string, 0, m.height)
 	lines = append(lines, m.viewHeader()...)
-	if m.mode == modeInfo {
+	switch {
+	case m.mode == modeInfo:
 		lines = append(lines, m.viewInfo()...)
-	} else {
+	case m.mode == modeSignal:
+		lines = append(lines, m.viewSignal()...)
+	default:
 		lines = append(lines, m.viewColumns())
 		lines = append(lines, m.viewRows()...)
 	}
@@ -83,12 +156,26 @@ func (m Model) viewHeader() []string {
 	mem, cpu := snap.Memory, snap.CPU
 
 	load := detail("load", fmt.Sprintf("%.2f  %.2f  %.2f", snap.Load.One, snap.Load.Five, snap.Load.Fifteen))
+	if cpu.Temp > 0 {
+		load += detailSep + detail("temp", fmt.Sprintf("%.0f°C", cpu.Temp))
+	}
 	memInfo := detail("used", fmt.Sprintf("%s of %s", formatBytes(mem.Used()), formatBytes(mem.Total)))
 	swapInfo := detail("used", fmt.Sprintf("%s of %s", formatBytes(mem.SwapUsed()), formatBytes(mem.SwapTotal)))
 	if mem.SwapTotal == 0 {
 		swapInfo = detail("used", "swap disabled")
 	}
-	bar := m.gaugeCells(load, memInfo, swapInfo)
+	disk := traffic("disk", "read", "write", snap.Disk)
+	net := traffic("net", "rx", "tx", snap.Net)
+
+	// Every detail on the right of the header starts at the same column,
+	// so the bars are all one length and the spark lines fill what a bar
+	// and its percentage take up together.
+	details := []string{load, memInfo, swapInfo, disk}
+	if !m.compact() {
+		details = append(details, net)
+	}
+	bar := m.gaugeCells(details...)
+	cells := sparkCells(bar)
 
 	var lines []string
 	if !m.compact() {
@@ -98,10 +185,18 @@ func (m Model) viewHeader() []string {
 	if !m.compact() {
 		lines = append(lines, "")
 	}
+	// The cores come first: they are what the total below them is made of,
+	// and the bar reads as their summary. The trend line under them is that
+	// same total over time, which is the difference between a machine that
+	// is busy and one that has been busy for a while — and it is the first
+	// header line a short terminal gives up, along with the network figures
+	// that ride on its right, because it is the only one that says
+	// something the lines below it already say, only earlier.
+	lines = append(lines, m.sparkRow("core", cpu.Cores, cells, disk))
+	if !m.compact() {
+		lines = append(lines, m.sparkRow("hist", tailValues(m.history, cells), cells, net))
+	}
 	lines = append(lines,
-		// The cores come first: they are what the total below them is made
-		// of, and the bar reads as their summary.
-		m.sparkRow("core", cpu.Cores),
 		m.meter("CPU", cpu.Total, bar, load),
 		"",
 		m.meter("MEM", mem.UsedPercent(), bar, memInfo),
@@ -111,6 +206,13 @@ func (m Model) viewHeader() []string {
 		lines = append(lines, "")
 	}
 	return lines
+}
+
+// traffic is one throughput as the header shows it: both directions, named
+// so that neither is mistaken for the other.
+func traffic(label, in, out string, t proc.Throughput) string {
+	return detail(label, fmt.Sprintf("%s %s  %s %s",
+		in, formatPerSecond(t.In), out, formatPerSecond(t.Out)))
 }
 
 // gaugeCells is how many cells the bars get: as many as the widest of the
@@ -128,12 +230,46 @@ func (m Model) gaugeCells(details ...string) int {
 	return max(1, min(cells, (m.inner()-meterFixed-1)/2))
 }
 
-// sparkRow is the labelled, bracketed line of per-core cells, laid out like
-// a meter so the two line up.
-func (m Model) sparkRow(label string, values []float64) string {
-	width := m.inner() - meterLabelWidth - len(meterGap) - len(gaugeOpen) - len(gaugeClose)
-	return styleLabel.Render(pad(label, meterLabelWidth, false)) + meterGap +
-		bracket(sparkline(values, width))
+// sparkRow is a labelled, bracketed line of cells, laid out like a meter so
+// that the two line up, with whatever detail belongs on its right. The
+// cells are padded out even when there are fewer values than that, so the
+// detail does not slide along the line with them.
+func (m Model) sparkRow(label string, values []float64, cells int, right string) string {
+	line := styleLabel.Render(pad(label, meterLabelWidth, false)) + meterGap +
+		bracket(padStyled(sparkline(values, cells), cells))
+	if right == "" || lipgloss.Width(line)+len(detailGap)+lipgloss.Width(right) > m.inner() {
+		return line
+	}
+	return line + detailGap + right
+}
+
+// sparkCells is how many cells a spark line gets for a given bar: as much
+// room as the bar, the gap after it and its percentage take up together,
+// less its own brackets, so that the details on the right of the two kinds
+// of line start at the same column.
+func sparkCells(bar int) int {
+	return gaugeWidth(bar) + len(meterGap) + len("100%") - len(gaugeOpen) - len(gaugeClose)
+}
+
+// padStyled pads content that has already been coloured out to w columns.
+// pad counts runes, which stops being the same thing once the escape codes
+// are in the string.
+func padStyled(s string, w int) string {
+	if gap := w - lipgloss.Width(s); gap > 0 {
+		return s + strings.Repeat(" ", gap)
+	}
+	return s
+}
+
+// tailValues is the newest end of a history, as much of it as fits in
+// width columns. A trend line is read from the right, so what is dropped
+// when it does not fit is the oldest of it, not the newest.
+func tailValues(values []float64, width int) []float64 {
+	n := len(values)
+	for n > 0 && sparkWidth(n) > width {
+		n--
+	}
+	return values[len(values)-n:]
 }
 
 // Spacing inside the header. The gauges keep a wide, constant gap on each
@@ -143,6 +279,7 @@ const (
 	meterLabelWidth = 4
 	meterGap        = "  "
 	detailGap       = "     "
+	detailSep       = "   "
 	titleGap        = "   "
 	titleSep        = "   ·   "
 
@@ -169,21 +306,37 @@ func (m Model) viewTitle() string {
 	// The gap before the clock is what the details have to fit inside.
 	budget := m.inner() - len("spy") - len(titleGap) - lipgloss.Width(clock) - 1
 
+	// What the processor is has a short form and a long one; the rest of
+	// the details have only themselves. Each is written in the first form
+	// the line still has room for, and the ones after a detail that does
+	// not fit at all are dropped with it.
+	cores := []string{fmt.Sprintf("%d cores", len(snap.CPU.Cores))}
+	if snap.CPU.Model != "" {
+		cores = append([]string{fmt.Sprintf("%d × %s", len(snap.CPU.Cores), snap.CPU.Model)}, cores...)
+	}
+
 	var shown []string
-	for _, part := range []string{
-		"up " + formatUptime(snap.Uptime),
-		fmt.Sprintf("%d cores", len(snap.CPU.Cores)),
-		fmt.Sprintf("%d procs, %d running", len(snap.Processes), snap.Load.Running),
+	for _, forms := range [][]string{
+		{"up " + formatUptime(snap.Uptime)},
+		cores,
+		{fmt.Sprintf("%d procs, %d running", len(snap.Processes), snap.Load.Running)},
 	} {
-		next := len(part)
+		sep := 0
 		if len(shown) > 0 {
-			next += len(titleSep)
+			sep = lipgloss.Width(titleSep)
 		}
-		if next > budget {
+		part := ""
+		for _, form := range forms {
+			if sep+lipgloss.Width(form) <= budget {
+				part = form
+				break
+			}
+		}
+		if part == "" {
 			break
 		}
 		shown = append(shown, part)
-		budget -= next
+		budget -= sep + lipgloss.Width(part)
 	}
 
 	title := styleBarStrong.Render("spy")
@@ -214,19 +367,15 @@ func (m Model) viewColumns() string {
 	if m.sort.descendingFirst() != m.reverse {
 		arrow = "▼"
 	}
-	// Cell positions of the sortable columns, matching the order in cells.
-	sorted := map[sortKey]int{sortPID: 0, sortCPU: 3, sortMem: 4, sortTime: 6, sortName: 7}
 
-	titles := []string{"PID", "USER", "S", "CPU%", "MEM%", "RSS", "TIME", "COMMAND"}
-	titles[sorted[m.sort]] += arrow
-
-	cells := m.cells(titles[0], titles[1], titles[2], titles[3], titles[4], titles[5], titles[6], titles[7])
-	for i, cell := range cells {
-		style := styleColumns
-		if i == sorted[m.sort] {
-			style = styleColumnsSort
+	cols := m.visibleColumns()
+	cells := make([]string, len(cols))
+	for i, c := range cols {
+		title, style := c.title, styleColumns
+		if c.sortable && c.key == m.sort {
+			title, style = title+arrow, styleColumnsSort
 		}
-		cells[i] = style.Render(cell)
+		cells[i] = style.Render(pad(title, m.columnWidth(c, cols), c.right))
 	}
 	// The gaps between the cells are part of the bar and are colored with
 	// it, and so is whatever is left of a line the columns do not fill.
@@ -260,16 +409,11 @@ func (m Model) viewRows() []string {
 
 func (m Model) viewRow(r row, selected bool) string {
 	p := r.proc
-	cells := m.cells(
-		fmt.Sprint(p.PID),
-		p.User,
-		p.State,
-		fmt.Sprintf("%.1f", p.CPU),
-		fmt.Sprintf("%.1f", p.Mem),
-		formatBytes(p.RSS),
-		formatCPUTime(p.CPUTime),
-		r.indent+p.Command,
-	)
+	cols := m.visibleColumns()
+	cells := make([]string, len(cols))
+	for i, c := range cols {
+		cells[i] = pad(m.cellValue(c, r), m.columnWidth(c, cols), c.right)
+	}
 	if selected {
 		// The highlight has to span the whole line, so it is styled as one
 		// plain string instead of per cell.
@@ -282,15 +426,58 @@ func (m Model) viewRow(r row, selected bool) string {
 		return styleDim.Render(strings.Join(cells, " "))
 	}
 
-	cells[1] = m.userStyle(p.User).Render(cells[1])
-	cells[2] = stateStyle(p.State).Render(cells[2])
-	cells[3] = heat(p.CPU).Render(cells[3])
-	cells[5] = styleDim.Render(cells[5])
-	cells[6] = styleDim.Render(cells[6])
-	if active(p) {
-		cells[7] = styleActive.Render(cells[7])
+	for i, c := range cols {
+		cells[i] = m.cellStyle(c, p).Render(cells[i])
 	}
 	return strings.Join(cells, " ")
+}
+
+// cellValue is what one column holds for one row.
+func (m Model) cellValue(c column, r row) string {
+	p := r.proc
+	switch c.id {
+	case colPID:
+		return strconv.Itoa(p.PID)
+	case colUser:
+		return p.User
+	case colState:
+		return p.State
+	case colCPU:
+		return fmt.Sprintf("%.1f", p.CPU)
+	case colMem:
+		return fmt.Sprintf("%.1f", p.Mem)
+	case colRSS:
+		return formatBytes(p.RSS)
+	case colTime:
+		return formatCPUTime(p.CPUTime)
+	case colRead:
+		return formatRate(p.Disk.In, p.DiskKnown)
+	case colWrite:
+		return formatRate(p.Disk.Out, p.DiskKnown)
+	default:
+		return r.indent + p.Command
+	}
+}
+
+// cellStyle is how much of the reader's attention one cell is worth: the
+// figures that carry the anomalies are colored, the ones that are only
+// context recede, and the plain ones are left alone.
+func (m Model) cellStyle(c column, p proc.Process) lipgloss.Style {
+	switch c.id {
+	case colUser:
+		return m.userStyle(p.User)
+	case colState:
+		return stateStyle(p.State)
+	case colCPU:
+		return heat(p.CPU)
+	case colRSS, colTime, colRead, colWrite:
+		return styleDim
+	case colCommand:
+		if active(p) {
+			return styleActive
+		}
+	}
+	return lipgloss.NewStyle()
 }
 
 // A process is worth the reader's attention when it is doing something
@@ -313,21 +500,6 @@ func (m Model) userStyle(name string) lipgloss.Style {
 	return styleOther
 }
 
-// cells lays out one table line, padded but unstyled so callers can color
-// individual columns without breaking the alignment.
-func (m Model) cells(pid, user, state, cpu, mem, rss, cputime, command string) []string {
-	return []string{
-		pad(pid, wPID, true),
-		pad(user, wUser, false),
-		pad(state, wState, false),
-		pad(cpu, wCPU, true),
-		pad(mem, wMem, true),
-		pad(rss, wRSS, true),
-		pad(cputime, wTime, true),
-		pad(command, max(10, m.inner()-fixedWidth), false),
-	}
-}
-
 // The detail panel is a label column wide enough for the longest label,
 // followed by the value, and two of those pairs to a line. It is kept
 // narrow so it reads as a panel over the table rather than another table.
@@ -335,6 +507,9 @@ const (
 	infoLabelWidth = 9
 	infoMinWidth   = 30
 	infoMaxWidth   = 64
+
+	// How much of the box the command is worth before the field rows are.
+	minCommandLines = 4
 )
 
 // viewInfo draws the detail panel in place of the table, column titles
@@ -343,7 +518,21 @@ const (
 // of them together would have.
 func (m Model) viewInfo() []string {
 	height := m.tableHeight() + 1
-	panel := strings.Split(m.infoPanel(m.info, height), "\n")
+	return m.panelLines(m.infoPanel(m.info, height), height)
+}
+
+// viewSignal draws the signal list in the same place, for the same reason:
+// picking what to send to one process is not something to do while reading
+// a table of all the others.
+func (m Model) viewSignal() []string {
+	height := m.tableHeight() + 1
+	return m.panelLines(m.signalPanel(height), height)
+}
+
+// panelLines centres a rendered box over the lines the table would have
+// taken, so opening one moves nothing else on the screen.
+func (m Model) panelLines(box string, height int) []string {
+	panel := strings.Split(box, "\n")
 	if len(panel) > height {
 		panel = panel[:height] // a terminal too short even for the trimmed box
 	}
@@ -352,12 +541,53 @@ func (m Model) viewInfo() []string {
 	return append(lines, blankLines(height-len(lines))...)
 }
 
+// signalPanel is the choice of what to send, the way htop asks it: the
+// process at the top, the signals under it, and the cursor on the one that
+// will be sent. A terminal too short for the whole list scrolls it, so
+// whatever is picked is on screen.
+func (m Model) signalPanel(height int) string {
+	width := m.panelWidth()
+	body := []string{
+		styleTitle.Render(pad(fmt.Sprintf("signal to %d %s",
+			m.confirm.PID, firstWord(m.confirm.Command)), width, false)),
+		"",
+	}
+
+	room := max(1, height-2-len(body))
+	first := clamp(m.signal-room/2, 0, max(0, len(signals)-room))
+	for i := first; i < len(signals) && i < first+room; i++ {
+		line := pad(fmt.Sprintf("%2d  %s", int(signals[i].number), signals[i].name), width, false)
+		if i == m.signal {
+			line = styleSelected.Render(line)
+		}
+		body = append(body, line)
+	}
+	return m.centre(styleInfoBox.Render(strings.Join(body, "\n")))
+}
+
+// panelWidth is how wide a panel is drawn: narrow enough to read as a box
+// over the table rather than as another table, and never wider than the
+// screen it has to leave a border on.
+func (m Model) panelWidth() int {
+	// The border and its padding cost four cells, which a narrow terminal
+	// has to come out of the panel rather than off the side of the screen.
+	return min(clamp(m.inner()-8, infoMinWidth, infoMaxWidth), m.inner()-4)
+}
+
+// centre indents a rendered box into the middle of the screen.
+func (m Model) centre(box string) string {
+	indent := strings.Repeat(" ", max(0, (m.inner()-lipgloss.Width(box))/2))
+	lines := strings.Split(box, "\n")
+	for i, line := range lines {
+		lines[i] = indent + line
+	}
+	return strings.Join(lines, "\n")
+}
+
 // infoPanel renders the bordered box for one process, centred across the
 // width of the screen and no taller than height.
 func (m Model) infoPanel(p proc.Process, height int) string {
-	// The border and its padding cost four cells, which a narrow terminal
-	// has to come out of the panel rather than off the side of the screen.
-	width := min(clamp(m.inner()-8, infoMinWidth, infoMaxWidth), m.inner()-4)
+	width := m.panelWidth()
 	available := height - 2 // the lines inside the border
 	fields := m.infoFields(p, width)
 	// The command takes what the field rows and its own label leave behind,
@@ -365,7 +595,14 @@ func (m Model) infoPanel(p proc.Process, height int) string {
 	// first thing given up. It never gets less than one line: showing the
 	// command is most of what the panel is for.
 	rows := len(slices.DeleteFunc(slices.Clone(fields), isSpacer))
-	budget := max(1, available-rows-2)
+	// The command keeps a few lines of its own even when the fields would
+	// have taken them: the trimming below gives the fields at the bottom of
+	// the box away first, and what those hold is the least of what the
+	// panel came to say.
+	budget := max(1, min(available-2, minCommandLines))
+	if room := available - rows - 2; room > budget {
+		budget = room
+	}
 
 	// The command is the one field with no length worth speaking of. When
 	// it does not fit, the panel gives up being narrow before it gives up
@@ -388,13 +625,7 @@ func (m Model) infoPanel(p proc.Process, height int) string {
 		body = append(fields, command...)
 	}
 
-	box := styleInfoBox.Render(strings.Join(body, "\n"))
-	indent := strings.Repeat(" ", max(0, (m.inner()-lipgloss.Width(box))/2))
-	lines := strings.Split(box, "\n")
-	for i, line := range lines {
-		lines[i] = indent + line
-	}
-	return strings.Join(lines, "\n")
+	return m.centre(styleInfoBox.Render(strings.Join(body, "\n")))
 }
 
 // infoFields is everything about a process that fits on one line, two
@@ -408,7 +639,10 @@ func (m Model) infoFields(p proc.Process, width int) []string {
 	pair := func(l1, v1, l2, v2 string) string {
 		return infoCell(l1, v1, left) + infoCell(l2, v2, width-left)
 	}
-	return []string{
+	full := func(label, value string) string { return infoCell(label, value, width) }
+
+	d := m.details
+	fields := []string{
 		styleTitle.Render(pad(fmt.Sprintf("process %d", p.PID), width, false)),
 		"",
 		pair("user", p.User, "state", formatState(p.State)),
@@ -417,8 +651,36 @@ func (m Model) infoFields(p proc.Process, width int) []string {
 		"",
 		pair("cpu", fmt.Sprintf("%.1f%%", p.CPU), "cpu time", formatCPUTime(p.CPUTime)),
 		pair("memory", fmt.Sprintf("%.1f%%", p.Mem), "rss", formatBytes(p.RSS)),
-		pair("virtual", formatBytes(p.VSize), "started", m.snap.At.Add(-p.Uptime).Format("02 Jan 15:04")),
+		pair("virtual", formatBytes(p.VSize), "swap", formatBytes(d.Swap)),
+		pair("disk r", formatRate(p.Disk.In, p.DiskKnown), "disk w", formatRate(p.Disk.Out, p.DiskKnown)),
+		pair("files", formatCount(d.Files), "ctx sw", strconv.FormatUint(d.Switches, 10)),
+		pair("started", m.snap.At.Add(-p.Uptime).Format("02 Jan 15:04"), "oom", strconv.Itoa(d.OOMScore)),
 	}
+	// The paths are the fields with nothing to pair them with: a cgroup or
+	// a working directory is worth a whole line or nothing at all, and a
+	// process that has none of them says so once, at the end.
+	for _, f := range []struct{ label, value string }{
+		{"cgroup", d.Cgroup},
+		{"exe", d.Exe},
+		{"cwd", d.CWD},
+	} {
+		if f.value != "" {
+			fields = append(fields, full(f.label, f.value))
+		}
+	}
+	if d.Restricted {
+		fields = append(fields, full("", styleDim.Render("some of it belongs to another account")))
+	}
+	return fields
+}
+
+// formatCount renders a count the reader may not have been allowed to
+// take, which reads as unknown rather than as none.
+func formatCount(n int) string {
+	if n < 0 {
+		return "-"
+	}
+	return strconv.Itoa(n)
 }
 
 // infoCommand is the command line wrapped over the lines the panel has
@@ -460,9 +722,11 @@ func (m Model) viewFooter() string {
 	switch {
 	case m.mode == modeInfo:
 		return m.fill(styleBar, styleBar.Render("i or esc to close"))
+	case m.mode == modeSignal:
+		return m.fill(styleBar, styleBar.Render("↑↓ to pick · enter to send · esc to cancel"))
 	case m.mode == modeConfirm:
-		return styleBarAlert.Render(pad(fmt.Sprintf("send SIGTERM to %d %s ? [y/N]",
-			m.confirm.PID, firstWord(m.confirm.Command)), m.inner(), false))
+		return styleBarAlert.Render(pad(fmt.Sprintf("send %s to %d %s ? [y/N]",
+			signals[m.signal].name, m.confirm.PID, firstWord(m.confirm.Command)), m.inner(), false))
 	case m.mode == modeFilter:
 		return m.prompt("filter: ", m.filter.text, "   enter to keep it · esc to clear")
 	case m.mode == modeThreshold:
@@ -483,7 +747,19 @@ func (m Model) viewFooter() string {
 	if m.tree {
 		state += " · tree"
 	}
-	return m.spread(m.viewHelp(), styleBar.Render(state), styleBar)
+	if m.follow != 0 {
+		state += fmt.Sprintf(" · following %d", m.follow)
+	}
+
+	right := styleBar.Render(state)
+	// A paused screen is no longer showing what the machine is doing,
+	// which is the one piece of state that has to be said out loud.
+	if m.paused {
+		right = styleBarWarn.Render("paused") + styleBar.Render(" · "+state)
+	}
+	// What the monitor is doing comes before the reminder of how to tell it
+	// to do something else, so the hints are what gives up the room.
+	return m.spread(m.viewHelp(m.inner()-lipgloss.Width(right)-lipgloss.Width(hintSep)), right, styleBar)
 }
 
 // prompt is the footer while something is being typed into it: the label,
@@ -499,7 +775,8 @@ func (m Model) prompt(label, text, hint string) string {
 
 // helpHints are the footer key reminders. A narrow terminal gives them up
 // from the right, so the two that have another way in — tab only cycles the
-// sort columns, l only opens a prompt the footer already echoes — are last.
+// sort columns, l only opens a prompt the footer already echoes — are last,
+// behind the keys that are the only way to what they do.
 var helpHints = []struct{ key, label string }{
 	{"↑↓", "move"},
 	{"c/m/p/n", "sort"},
@@ -508,30 +785,34 @@ var helpHints = []struct{ key, label string }{
 	{"i", "info"},
 	{"x", "kill"},
 	{"q", "quit"},
+	{"space", "pause"},
+	{"f", "follow"},
+	{"[ ]", "nice"},
 	{"tab", "column"},
 	{"l", "min"},
 }
 
-// viewHelp joins as many hints as the width allows, dropping the rest from
-// the right: a footer that wraps costs the table a line and pushes the
-// bottom of the screen out of view.
-func (m Model) viewHelp() string {
-	const sep = " · "
+// hintSep separates two key reminders in the footer.
+const hintSep = " · "
 
+// viewHelp joins as many hints as the budget allows, dropping the rest
+// from the right: a footer that wraps costs the table a line and pushes
+// the bottom of the screen out of view.
+func (m Model) viewHelp(budget int) string {
 	var shown []string
 	used := 0
 	for _, h := range helpHints {
 		next := lipgloss.Width(h.key) + 1 + len(h.label)
 		if len(shown) > 0 {
-			next += len(sep)
+			next += lipgloss.Width(hintSep)
 		}
-		if used+next > m.inner() {
+		if used+next > budget {
 			break
 		}
 		shown = append(shown, hint(h.key, h.label))
 		used += next
 	}
-	return strings.Join(shown, styleBar.Render(sep))
+	return strings.Join(shown, styleBar.Render(hintSep))
 }
 
 func hint(key, label string) string {

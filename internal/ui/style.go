@@ -155,6 +155,15 @@ const sparkGroup = 4
 // than width cells: a header line that wraps costs the table a row. A
 // machine with too many cores for the gaps loses them first, and only then
 // the cores on the right, replaced by an ellipsis.
+// sparkWidth is how many columns n cells take up once the gaps between the
+// groups are in.
+func sparkWidth(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return n + (n-1)/sparkGroup
+}
+
 func sparkline(values []float64, width int) string {
 	if width <= 0 || len(values) == 0 {
 		return ""

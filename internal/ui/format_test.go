@@ -117,3 +117,49 @@ func TestFormatState(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatRate(t *testing.T) {
+	cases := []struct {
+		name  string
+		rate  float64
+		known bool
+		want  string
+	}{
+		{name: "megabytes a second", rate: 12 << 20, known: true, want: "12M"},
+		{name: "a trickle", rate: 3 << 10, known: true, want: "3.0K"},
+		{name: "idle", rate: 0, known: true, want: "0"},
+		{name: "less than a byte a second", rate: 0.4, known: true, want: "0"},
+		{name: "not allowed to look", rate: 0, want: "-"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatRate(c.rate, c.known); got != c.want {
+				t.Errorf("formatRate(%v, %v) = %q, want %q", c.rate, c.known, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFormatPerSecond(t *testing.T) {
+	cases := map[float64]string{
+		0:        "0B/s",
+		1500:     "1.5K/s",
+		12 << 20: "12M/s",
+	}
+	for rate, want := range cases {
+		t.Run(want, func(t *testing.T) {
+			if got := formatPerSecond(rate); got != want {
+				t.Errorf("formatPerSecond(%v) = %q, want %q", rate, got, want)
+			}
+		})
+	}
+}
+
+func TestFormatCount(t *testing.T) {
+	if got := formatCount(42); got != "42" {
+		t.Errorf("formatCount(42) = %q", got)
+	}
+	if got := formatCount(-1); got != "-" {
+		t.Errorf("formatCount(-1) = %q, want a dash for a count that could not be taken", got)
+	}
+}
